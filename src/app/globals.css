@@ -157,6 +157,7 @@ button { touch-action: manipulation; }
   position: absolute; top: 16px; left: 50%; transform: translateX(-50%); z-index: 5;
   font-size: 11px; color: var(--muted); background: rgba(8, 12, 22, 0.72);
   padding: 6px 12px; border-radius: 20px; border: 1px solid var(--panel-brd);
+  max-width: calc(100vw - 540px); text-align: center;
 }
 
 /* ---------- итог ---------- */
@@ -175,6 +176,38 @@ button { touch-action: manipulation; }
 .result-bad .result-title { color: #ff9d9d; }
 .result-text { font-size: 14px; line-height: 1.55; color: var(--muted); margin-bottom: 16px; }
 .result-score { font-size: 15px; margin-bottom: 18px; }
+.result-record {
+  margin-left: 9px; font-size: 10.5px; letter-spacing: 0.8px; text-transform: uppercase;
+  padding: 3px 8px; border-radius: 20px; color: #04121d; font-weight: 700;
+  background: linear-gradient(135deg, #ffd166, #ffa94d);
+}
+.result-buttons { display: flex; gap: 10px; }
+.result-buttons .ghost { flex: 1; font-size: 13px; }
+
+/* ---------- рекорд, всплывающая подсказка, отказ WebGL ---------- */
+.record {
+  margin: 10px 0 2px; font-size: 12px; color: var(--muted);
+  padding: 8px 11px; border-radius: 10px;
+  background: rgba(255, 209, 102, 0.09); border: 1px solid rgba(255, 209, 102, 0.28);
+}
+.record b { color: #ffd98a; font-family: var(--mono); }
+
+.toast {
+  position: absolute; bottom: 26px; left: 50%; transform: translateX(-50%); z-index: 20;
+  font-size: 12.5px; color: var(--txt); background: rgba(8, 12, 22, 0.92);
+  padding: 9px 16px; border-radius: 20px; border: 1px solid var(--panel-brd);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+}
+
+.fatal {
+  position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.fatal-box {
+  width: min(460px, 100%); padding: 26px 28px; border-radius: 16px; text-align: center;
+  background: var(--panel); border: 1px solid var(--panel-brd);
+}
+.fatal-title { font-size: 20px; font-weight: 700; margin-bottom: 10px; }
+.fatal-text { font-size: 14px; line-height: 1.6; color: var(--muted); margin: 0; }
 
 @media (max-width: 1180px) {
   .panel-left, .panel-right { width: 268px; max-height: calc(100vh - 300px); }
@@ -220,7 +253,7 @@ button { touch-action: manipulation; }
 .sheet-body .cbtn { width: 42px; height: 38px; }
 .sheet-body .counter { font-size: 13px; margin-top: 8px; }
 
-.preset-row { display: flex; gap: 8px; }
+.preset-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .preset-row .ghost { flex: 1; }
 
 .sheet-foot {
@@ -274,6 +307,8 @@ button { touch-action: manipulation; }
 
 .game-mobile .result { padding: 22px 20px; }
 .game-mobile .result-title { font-size: 21px; }
+.game-mobile .result-buttons { flex-direction: column; }
+.game-mobile .toast { bottom: auto; top: 16px; }
 
 /* телефон в альбомной ориентации: сцена слева, конструктор справа */
 @media (orientation: landscape) and (max-height: 560px) {

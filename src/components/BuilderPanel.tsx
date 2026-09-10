@@ -8,9 +8,12 @@ interface Props {
   design: Design;
   stats: DesignStats;
   mobile: boolean;
+  /** Лучший результат для выбранной полезной нагрузки, если он уже есть. */
+  record?: number;
   onChange: (patch: Partial<Design>) => void;
   onLaunch: () => void;
   onPreset: (name: 'good' | 'bad') => void;
+  onShare: () => void;
 }
 
 const fmt = (v: number, d = 0) => v.toLocaleString('ru-RU', { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -23,7 +26,9 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'calc', label: 'Расчёт' },
 ];
 
-export default function BuilderPanel({ design, stats, mobile, onChange, onLaunch, onPreset }: Props) {
+export default function BuilderPanel({
+  design, stats, mobile, record, onChange, onLaunch, onPreset, onShare,
+}: Props) {
   const [tab, setTab] = useState<Tab>('body');
   const s1Engines = ENGINES.filter((e) => e.stage === 1);
   const s2Engines = ENGINES.filter((e) => e.stage === 2);
@@ -67,7 +72,8 @@ export default function BuilderPanel({ design, stats, mobile, onChange, onLaunch
         <span>Число двигателей</span>
         <div className="counter-btns">
           {[1, 2, 3, 4].map((n) => (
-            <button key={n} className={`cbtn${design.s1EngineCount === n ? ' cbtn-on' : ''}`}
+            <button key={n} type="button" aria-pressed={design.s1EngineCount === n}
+              className={`cbtn${design.s1EngineCount === n ? ' cbtn-on' : ''}`}
               onClick={() => onChange({ s1EngineCount: n })}>{n}</button>
           ))}
         </div>
@@ -117,12 +123,18 @@ export default function BuilderPanel({ design, stats, mobile, onChange, onLaunch
   );
   const presets = (
     <div className="preset-row">
-      <button className="ghost" onClick={() => onPreset('good')}>Пример удачной РН</button>
-      <button className="ghost" onClick={() => onPreset('bad')}>Пример провальной РН</button>
+      <button type="button" className="ghost" onClick={() => onPreset('good')}>Пример удачной РН</button>
+      <button type="button" className="ghost" onClick={() => onPreset('bad')}>Пример провальной РН</button>
+      <button type="button" className="ghost" onClick={onShare}>Поделиться компоновкой</button>
     </div>
   );
+  const recordLine = record ? (
+    <div className="record">
+      Рекорд для этой нагрузки: <b>{fmt(record)}</b> очков
+    </div>
+  ) : null;
   const launchBtn = (
-    <button className={`launch${fatal ? ' launch-risky' : ''}`} onClick={onLaunch}>
+    <button type="button" className={`launch${fatal ? ' launch-risky' : ''}`} onClick={onLaunch}>
       {fatal ? 'Всё равно запустить' : 'Запуск'}
     </button>
   );
@@ -134,7 +146,8 @@ export default function BuilderPanel({ design, stats, mobile, onChange, onLaunch
           <h1 className="brand"><span className="brand-mark">▲</span> Конструктор орбитальной РН</h1>
           <div className="tabs">
             {TABS.map((t) => (
-              <button key={t.id} className={`tab${tab === t.id ? ' tab-on' : ''}`} onClick={() => setTab(t.id)}>
+              <button key={t.id} type="button" aria-pressed={tab === t.id}
+                className={`tab${tab === t.id ? ' tab-on' : ''}`} onClick={() => setTab(t.id)}>
                 {t.label}
               </button>
             ))}
@@ -151,7 +164,7 @@ export default function BuilderPanel({ design, stats, mobile, onChange, onLaunch
           </>)}
           {tab === 's1' && (<>{s1EngineGroup}{s1TankGroup}</>)}
           {tab === 's2' && (<>{s2Group}{payloadGroup}</>)}
-          {tab === 'calc' && (<>{statGrid}{checkList}{presets}</>)}
+          {tab === 'calc' && (<>{statGrid}{recordLine}{checkList}{presets}</>)}
         </div>
 
         <div className="sheet-foot">
@@ -184,7 +197,7 @@ export default function BuilderPanel({ design, stats, mobile, onChange, onLaunch
       </aside>
 
       <section className="panel panel-bottom">
-        {statGrid}{checkList}
+        {statGrid}{recordLine}{checkList}
         <div className="launch-row">{presets}{launchBtn}</div>
       </section>
     </>
@@ -204,7 +217,7 @@ function Opt({ on, onClick, title, sub, desc }: {
   on: boolean; onClick: () => void; title: string; sub: string; desc?: string;
 }) {
   return (
-    <button className={`opt${on ? ' opt-on' : ''}`} onClick={onClick}>
+    <button type="button" className={`opt${on ? ' opt-on' : ''}`} onClick={onClick} aria-pressed={on}>
       <span className="opt-title">{title}</span>
       <span className="opt-sub">{sub}</span>
       {desc && <span className="opt-desc">{desc}</span>}

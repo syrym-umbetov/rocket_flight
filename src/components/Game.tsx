@@ -11,6 +11,9 @@ import {
   createWorld, makeExplosion, pushTrail, resetTrail, triggerExplosion, updateExplosion,
   type Explosion, type World,
 } from '@/lib/scene';
+import {
+  loadDesign, loadRecords, saveDesign, saveRecord, shareUrl, type Records,
+} from '@/lib/storage';
 import { isMobileNow, useMobile } from '@/lib/useMobile';
 import BuilderPanel from './BuilderPanel';
 import HUD, { type HudActions } from './HUD';
@@ -42,6 +45,8 @@ function snapshot(s: SimState): Telemetry {
   };
 }
 
+interface Outcome { ok: boolean; title: string; text: string; score?: number; record?: boolean }
+
 export default function Game() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const worldRef = useRef<World | null>(null);
@@ -53,25 +58,32 @@ export default function Game() {
   const modeRef = useRef<Mode>('build');
   const camRef = useRef<CamMode>('chase');
   const warpRef = useRef(1);
+  const pausedRef = useRef(false);
   const camPosRef = useRef(new THREE.Vector3());
   const camOffsetRef = useRef(new THREE.Vector3());
   const buildSpinRef = useRef(0);
   const kitRef = useRef<Kit | null>(null);
   const designRef = useRef<Design>(DEFAULT_DESIGN);
+  const recordsRef = useRef<Records>({});
 
   const detected = useMobile();
   const mobile = detected === true;
   const layoutReady = detected !== null;
+  // цикл рендера читает раскладку из ref: он живёт вне React и о состоянии не знает
   const mobileRef = useRef(mobile);
-  mobileRef.current = mobile;
+  useEffect(() => { mobileRef.current = mobile; }, [mobile]);
 
   const [design, setDesign] = useState<Design>(DEFAULT_DESIGN);
   const [stats, setStats] = useState<DesignStats>(() => analyze(DEFAULT_DESIGN));
   const [mode, setMode] = useState<Mode>('build');
   const [telemetry, setTelemetry] = useState<Telemetry | null>(null);
   const [warp, setWarp] = useState(1);
+  const [paused, setPaused] = useState(false);
   const [camMode, setCamMode] = useState<CamMode>('chase');
-  const [outcome, setOutcome] = useState<{ ok: boolean; title: string; text: string; score?: number } | null>(null);
+  const [outcome, setOutcome] = useState<Outcome | null>(null);
+  const [records, setRecords] = useState<Records>({});
+  const [shareNote, setShareNote] = useState<string | null>(null);
+  const [initError, setInitError] = useState<string | null>(null);
 
   /** Пересобрать 3D-модель под текущую конструкцию. */
   const rebuildRocket = useCallback((d: Design) => {
@@ -79,12 +91,11 @@ export default function Game() {
     if (!world) return;
     if (rocketRef.current) {
       world.scene.remove(rocketRef.current.root);
-      rocketRef.current.root.traverse((o) => {
-        const m = o as THREE.Mesh;
-        if (m.geometry) m.geometry.dispose();
-      });
+      if (jettisonRef.current) world.scene.remove(jettisonRef.current);
+      // освобождает только то, что создала сама сборка: детали кита общие
+      rocketRef.current.dispose();
     }
-    if (jettisonRef.current) { world.scene.remove(jettisonRef.current); jettisonRef.current = null; }
+    jettisonRef.current = null;
     const parts = resolveParts(d);
     const L = layout(parts);
     const meshes = buildRocket(parts, L, kitRef.current);
@@ -96,8 +107,20 @@ export default function Game() {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+
     // сцена строится раньше, чем useMobile отдаст ответ, поэтому спрашиваем медиа-запрос напрямую
-    const world = createWorld(canvas, isMobileNow());
+    let world: World;
+    try {
+      world = createWorld(canvas, isMobileNow());
+    } catch (e) {
+      // без WebGL показывать пустой холст бессмысленно — объясняем, что случилось.
+      // Разовый отказ внешней системы — как раз тот случай, когда состояние
+      // выставляется из эффекта.
+      console.error('Сцена не создана:', e);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setInitError('Не удалось запустить WebGL. Включите аппаратное ускорение в браузере или откройте игру на другом устройстве.');
+      return;
+    }
     worldRef.current = world;
 
     const { state, stats: st } = createFlight(DEFAULT_DESIGN);
@@ -130,6 +153,12 @@ export default function Game() {
     const ro = new ResizeObserver(resize);
     ro.observe(canvas);
 
+    const onContextLost = (e: Event) => {
+      e.preventDefault();
+      setInitError('Браузер потерял контекст WebGL. Перезагрузите страницу, чтобы продолжить.');
+    };
+    canvas.addEventListener('webglcontextlost', onContextLost);
+
     let raf = 0;
     let last = performance.now();
     let acc = 0;
@@ -138,6 +167,9 @@ export default function Game() {
     const axis = new THREE.Vector3();
     const desired = new THREE.Vector3();
     const target = new THREE.Vector3();
+    const side = new THREE.Vector3();
+    const sepAxis = new THREE.Vector3();
+    const POLE = new THREE.Vector3(0, 0, 1);
 
     const loop = () => {
       raf = requestAnimationFrame(loop);
@@ -153,7 +185,7 @@ export default function Game() {
       // --- физика ---
       // на баллистической паузе ждать в реальном времени бессмысленно
       const autoWarp = s.phase === 'coast' ? Math.max(warpRef.current, 20) : warpRef.current;
-      if (modeRef.current === 'flight' && s.status === 'flying') {
+      if (modeRef.current === 'flight' && s.status === 'flying' && !pausedRef.current) {
         acc += real * autoWarp;
         let steps = Math.floor(acc / DT);
         acc -= steps * DT;
@@ -181,9 +213,9 @@ export default function Game() {
         rocket.plume1.visible = false;
       }
       if (jettisonRef.current && s.sepPos && s.sepQuat) {
-        const ax = new THREE.Vector3(0, 1, 0).applyQuaternion(s.sepQuat);
+        sepAxis.set(0, 1, 0).applyQuaternion(s.sepQuat);
         jettisonRef.current.quaternion.copy(s.sepQuat);
-        jettisonRef.current.position.copy(s.sepPos).addScaledVector(ax, anchor);
+        jettisonRef.current.position.copy(s.sepPos).addScaledVector(sepAxis, anchor);
         // далеко улетевший блок только мешает кадру
         jettisonRef.current.visible = s.sepPos.distanceToSquared(s.pos) < 9e6;
       }
@@ -223,17 +255,17 @@ export default function Game() {
         target.set(0, R_PLANET + len * 0.5, 0);
       } else if (camRef.current === 'orbit') {
         const d = Math.max(alt * 2.4 + 12_000, 40_000);
-        const side = new THREE.Vector3().crossVectors(up, new THREE.Vector3(0, 0, 1)).normalize();
+        side.crossVectors(up, POLE).normalize();
         desired.copy(s.pos).addScaledVector(side, d).addScaledVector(up, d * 0.35);
         target.copy(s.pos);
       } else if (camRef.current === 'side') {
         const d = fitDist * 1.15 + Math.min(alt * 0.02, 220);
-        const side = new THREE.Vector3().crossVectors(up, new THREE.Vector3(0, 0, 1)).normalize();
+        side.crossVectors(up, POLE).normalize();
         desired.copy(rocket.root.position).addScaledVector(side, d).addScaledVector(up, len * 0.15);
         target.copy(rocket.root.position).addScaledVector(axis, -len * 0.45);
       } else {
         const d = fitDist + Math.min(s.speed * 0.05, 260);
-        const side = new THREE.Vector3().crossVectors(axis, up).normalize();
+        side.crossVectors(axis, up).normalize();
         if (side.lengthSq() < 0.01) side.set(1, 0, 0);
         desired.copy(rocket.root.position)
           .addScaledVector(axis, -len * 0.9)
@@ -276,12 +308,26 @@ export default function Game() {
         snap.fuel2 = stat.stage2Fuel > 0 ? s.fuel2 / stat.stage2Fuel : 0;
         setTelemetry(snap);
         setWarp(autoWarp);
+
+        // Итог полёта показывается один раз: пока текст не изменился, состояние
+        // не трогаем, иначе оверлей перерисовывался бы десять раз в секунду.
+        let next: Outcome | null = null;
         if (s.status === 'orbit') {
-          setOutcome({ ok: true, title: 'Орбита достигнута', text: s.message, score: s.score });
+          const prev = recordsRef.current;
+          const updated = saveRecord(prev, stat.parts.payload.id, s.score);
+          if (updated !== prev) { recordsRef.current = updated; setRecords(updated); }
+          next = {
+            ok: true, title: 'Миссия выполнена', text: s.message,
+            score: s.score, record: updated !== prev,
+          };
         } else if (s.status === 'destroyed') {
-          setOutcome({ ok: false, title: 'Авария', text: s.message });
+          next = { ok: false, title: 'Авария', text: s.message };
         } else if (s.doomed) {
-          setOutcome({ ok: false, title: 'Задача не выполнена', text: s.message });
+          next = { ok: false, title: 'Задача не выполнена', text: s.message };
+        }
+        if (next) {
+          const n = next;
+          setOutcome((cur) => (cur && cur.title === n.title && cur.text === n.text ? cur : n));
         }
       }
     };
@@ -291,6 +337,7 @@ export default function Game() {
       alive = false;
       cancelAnimationFrame(raf);
       ro.disconnect();
+      canvas.removeEventListener('webglcontextlost', onContextLost);
       window.removeEventListener('resize', resize);
       window.removeEventListener('orientationchange', resize);
       world.dispose();
@@ -311,6 +358,10 @@ export default function Game() {
     if (!s.autopilot) s.throttle = 1;
     setTelemetry((t) => (t ? { ...t, autopilot: s.autopilot } : t));
   }, []);
+  const togglePause = useCallback(() => {
+    pausedRef.current = !pausedRef.current;
+    setPaused(pausedRef.current);
+  }, []);
   const warpUp = useCallback(() => {
     const v = warpRef.current >= 20 ? 50 : warpRef.current >= 5 ? 20 : warpRef.current >= 2 ? 5 : 2;
     warpRef.current = v; setWarp(v);
@@ -327,7 +378,10 @@ export default function Game() {
     if (s) s.throttle = Math.max(0, Math.min(1, s.throttle + d));
   }, []);
 
-  const actions: HudActions = { cycleCamera, toggleAutopilot, warpDown, warpUp, pitch: setPitch, throttle: nudgeThrottle };
+  const actions: HudActions = {
+    cycleCamera, toggleAutopilot, togglePause, warpDown, warpUp,
+    pitch: setPitch, throttle: nudgeThrottle,
+  };
 
   // --- клавиатура ---
   useEffect(() => {
@@ -337,6 +391,7 @@ export default function Game() {
       if (e.code === 'KeyC') cycleCamera();
       if (modeRef.current !== 'flight') return;
       if (e.code === 'KeyA') toggleAutopilot();
+      if (e.code === 'Space' || e.code === 'KeyP') { togglePause(); e.preventDefault(); }
       if (e.code === 'Period' || e.code === 'BracketRight') warpUp();
       if (e.code === 'Comma' || e.code === 'BracketLeft') warpDown();
       if (e.code === 'ArrowUp') { s.manualPitch = -1; e.preventDefault(); }
@@ -351,12 +406,13 @@ export default function Game() {
     window.addEventListener('keydown', onKey);
     window.addEventListener('keyup', onUp);
     return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('keyup', onUp); };
-  }, [cycleCamera, toggleAutopilot, warpUp, warpDown, nudgeThrottle]);
+  }, [cycleCamera, toggleAutopilot, togglePause, warpUp, warpDown, nudgeThrottle]);
 
   const applyDesign = useCallback((d: Design) => {
     designRef.current = d;
     setDesign(d);
     setStats(analyze(d));
+    saveDesign(d);
     const { state, stats: st } = createFlight(d);
     simRef.current = state;
     statsRef.current = st;
@@ -366,6 +422,21 @@ export default function Game() {
     camPosRef.current.set(0, 0, 0);
   }, [rebuildRocket]);
 
+  // Компоновку из ссылки или прошлой сессии подхватываем уже после монтирования:
+  // страница отдаётся статикой, и чтение localStorage при рендере разошлось бы
+  // с серверной разметкой.
+  useEffect(() => {
+    const stored = loadRecords();
+    recordsRef.current = stored;
+    // хранилище — внешняя система, а не производное состояние: читаем один раз
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setRecords(stored);
+    const saved = loadDesign();
+    if (saved) applyDesign(saved);
+    // намеренно только при монтировании
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const onChange = useCallback((patch: Partial<Design>) => {
     applyDesign({ ...design, ...patch });
   }, [design, applyDesign]);
@@ -373,6 +444,22 @@ export default function Game() {
   const onPreset = useCallback((name: 'good' | 'bad') => {
     applyDesign(name === 'good' ? { ...GOOD_PRESET } : { ...BAD_PRESET });
   }, [applyDesign]);
+
+  const onShare = useCallback(() => {
+    const url = shareUrl(designRef.current);
+    // адресная строка обновляется всегда: буфер обмена доступен не в каждом браузере
+    window.history.replaceState(null, '', url);
+    const inBar = 'Ссылка на компоновку — в адресной строке';
+    const clip = navigator.clipboard;
+    if (clip) clip.writeText(url).then(() => setShareNote('Ссылка на компоновку скопирована')).catch(() => setShareNote(inBar));
+    else setShareNote(inBar);
+  }, []);
+
+  useEffect(() => {
+    if (!shareNote) return;
+    const id = window.setTimeout(() => setShareNote(null), 2600);
+    return () => window.clearTimeout(id);
+  }, [shareNote]);
 
   const startLaunch = useCallback(() => {
     const world = worldRef.current;
@@ -383,6 +470,7 @@ export default function Game() {
     world.debris.visible = false;
     igniteRocket(s);
     warpRef.current = 1; setWarp(1);
+    pausedRef.current = false; setPaused(false);
     camRef.current = 'chase'; setCamMode('chase');
     camPosRef.current.set(0, 0, 0);
     setOutcome(null);
@@ -391,41 +479,67 @@ export default function Game() {
     setMode('flight');
   }, []);
 
+  /** Повторить запуск той же ракеты, не возвращаясь в конструктор. */
+  const relaunch = useCallback(() => {
+    applyDesign(designRef.current);
+    startLaunch();
+  }, [applyDesign, startLaunch]);
+
   const backToBuild = useCallback(() => {
     modeRef.current = 'build';
     setMode('build');
     setOutcome(null);
     setTelemetry(null);
-    applyDesign(design);
-  }, [design, applyDesign]);
+    pausedRef.current = false; setPaused(false);
+    applyDesign(designRef.current);
+  }, [applyDesign]);
+
+  if (initError) {
+    return (
+      <div className="fatal">
+        <div className="fatal-box">
+          <div className="fatal-title">Сцена не запустилась</div>
+          <p className="fatal-text">{initError}</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`game${mobile ? ' game-mobile' : ''} game-${mode}`}>
       <div className="stage"><canvas ref={canvasRef} className="canvas" /></div>
       {layoutReady && mode === 'build' && (
-        <BuilderPanel design={design} stats={stats} mobile={mobile}
-          onChange={onChange} onLaunch={startLaunch} onPreset={onPreset} />
+        <BuilderPanel design={design} stats={stats} mobile={mobile} record={records[design.payload]}
+          onChange={onChange} onLaunch={startLaunch} onPreset={onPreset} onShare={onShare} />
       )}
       {layoutReady && mode === 'flight' && telemetry && (
         <>
-          <HUD t={telemetry} warp={warp} camera={mobile ? CAM_SHORT[camMode] : CAM_RU[camMode]}
+          <HUD t={telemetry} warp={warp} paused={paused}
+            camera={mobile ? CAM_SHORT[camMode] : CAM_RU[camMode]}
             mobile={mobile} actions={actions} />
           {!mobile && (
             <div className="hints">
-              C — камера · A — автопилот · ←/→ — тяга · ↑/↓ — тангаж (в ручном) · , / . — ускорение времени
+              C — камера · A — автопилот · пробел — пауза · ←/→ — тяга · ↑/↓ — тангаж (в ручном) · , / . — ускорение времени
             </div>
           )}
         </>
       )}
+      {shareNote && <div className="toast">{shareNote}</div>}
       {outcome && (
         <div className="overlay">
           <div className={`result ${outcome.ok ? 'result-ok' : 'result-bad'}`}>
             <div className="result-title">{outcome.title}</div>
             <div className="result-text">{outcome.text}</div>
             {outcome.score !== undefined && (
-              <div className="result-score">Очки миссии: <b>{outcome.score}</b></div>
+              <div className="result-score">
+                Очки миссии: <b>{outcome.score}</b>
+                {outcome.record && <span className="result-record">новый рекорд</span>}
+              </div>
             )}
-            <button className="launch" onClick={backToBuild}>К конструктору</button>
+            <div className="result-buttons">
+              <button className="launch" onClick={relaunch}>Повторить запуск</button>
+              <button className="ghost" onClick={backToBuild}>К конструктору</button>
+            </div>
           </div>
         </div>
       )}

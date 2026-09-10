@@ -98,32 +98,43 @@ export function layout(p: Parts): Layout {
   };
 }
 
-interface MassItem { m: number; x: number }
+export interface MassProps { mass: number; cm: number }
 
 /**
  * Массовая сводка при заданном остатке топлива.
  * stage: 0 — обе ступени, 1 — первая отделена, 2 — топливо кончилось.
+ *
+ * Считается на каждом шаге интегрирования (центровка «плывёт» по мере
+ * выгорания топлива), поэтому суммирование идёт без промежуточного массива,
+ * а результат можно писать в переданный объект `out`.
  */
-export function massProps(p: Parts, L: Layout, stage: number, fuel1: number, fuel2: number) {
-  const items: MassItem[] = [
-    { m: p.nose.mass, x: L.noseStart + p.nose.length * 0.6 },
-    { m: FAIRING_MASS + p.payload.mass, x: (L.fairingStart + L.fairingEnd) / 2 },
-    { m: p.s2Tank.dry, x: (L.s2TankStart + L.s2TankEnd) / 2 },
-    { m: fuel2, x: (L.s2TankStart + L.s2TankEnd) / 2 },
-    { m: p.s2Engine.mass, x: (L.s2EngineStart + L.s2EngineEnd) / 2 },
-  ];
+export function massProps(
+  p: Parts, L: Layout, stage: number, fuel1: number, fuel2: number,
+  out: MassProps = { mass: 0, cm: 0 },
+): MassProps {
+  let mass = 0;
+  let mx = 0;
+  const add = (m: number, x: number) => { mass += m; mx += m * x; };
+
+  const s2Mid = (L.s2TankStart + L.s2TankEnd) / 2;
+  add(p.nose.mass, L.noseStart + p.nose.length * 0.6);
+  add(FAIRING_MASS + p.payload.mass, (L.fairingStart + L.fairingEnd) / 2);
+  add(p.s2Tank.dry, s2Mid);
+  add(fuel2, s2Mid);
+  add(p.s2Engine.mass, (L.s2EngineStart + L.s2EngineEnd) / 2);
+
   if (stage === 0) {
-    items.push(
-      { m: INTERSTAGE_MASS, x: (L.interstageStart + L.interstageEnd) / 2 },
-      { m: p.s1Tank.dry, x: (L.s1TankStart + L.s1TankEnd) / 2 },
-      { m: fuel1, x: (L.s1TankStart + L.s1TankEnd) / 2 },
-      { m: p.s1Engine.mass * p.s1EngineCount, x: (L.s1EngineStart + L.s1EngineEnd) / 2 },
-      { m: p.fins.mass, x: L.finX },
-    );
+    const s1Mid = (L.s1TankStart + L.s1TankEnd) / 2;
+    add(INTERSTAGE_MASS, (L.interstageStart + L.interstageEnd) / 2);
+    add(p.s1Tank.dry, s1Mid);
+    add(fuel1, s1Mid);
+    add(p.s1Engine.mass * p.s1EngineCount, (L.s1EngineStart + L.s1EngineEnd) / 2);
+    add(p.fins.mass, L.finX);
   }
-  let mass = 0, mx = 0;
-  for (const it of items) { mass += it.m; mx += it.m * it.x; }
-  return { mass, cm: mass > 0 ? mx / mass : 0 };
+
+  out.mass = mass;
+  out.cm = mass > 0 ? mx / mass : 0;
+  return out;
 }
 
 /** Центр давления по упрощённой методике Барроумена. */
@@ -184,8 +195,8 @@ export function analyze(d: Design): DesignStats {
   const dv1 = isp1 * G0 * Math.log(full.mass / burnout1.mass);
   const dv2 = p.s2Engine.ispVac * G0 * Math.log(stage2Full.mass / stage2Dry.mass);
 
-  const cpFull = centerOfPressure(p, L, 0).cp;
-  const cpEmpty = centerOfPressure(p, L, 0).cp;
+  // ЦД от остатка топлива не зависит — «плывёт» только центр масс
+  const cp = centerOfPressure(p, L, 0).cp;
 
   const mdot1 = (p.s1Engine.thrustVac * p.s1EngineCount) / (p.s1Engine.ispVac * G0);
   const mdot2 = p.s2Engine.thrustVac / (p.s2Engine.ispVac * G0);
@@ -199,8 +210,8 @@ export function analyze(d: Design): DesignStats {
     thrust1SL,
     twr,
     dv1, dv2, dvTotal: dv1 + dv2,
-    stabilityFull: (cpFull - full.cm) / DIAMETER,
-    stabilityEmpty: (cpEmpty - burnout1.cm) / DIAMETER,
+    stabilityFull: (cp - full.cm) / DIAMETER,
+    stabilityEmpty: (cp - burnout1.cm) / DIAMETER,
     burn1: f1 / mdot1,
     burn2: f2 / mdot2,
     twrStage2: p.s2Engine.thrustVac / (stage2Full.mass * 9.80665),

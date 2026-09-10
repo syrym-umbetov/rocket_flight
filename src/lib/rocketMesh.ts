@@ -12,6 +12,27 @@ const NOZZLE = new THREE.MeshStandardMaterial({ color: 0x4a4f5a, metalness: 0.9,
 
 const R = DIAMETER / 2;
 
+/**
+ * Учёт ресурсов, созданных конкретной сборкой.
+ *
+ * Детали кита клонируются через `Object3D.clone()`, а он делит геометрию и
+ * материалы с оригиналом — освободить их при пересборке ракеты значило бы
+ * сломать кит для следующих сборок. Материалы-константы этого модуля тоже
+ * общие. Поэтому каждая сборка запоминает только то, что создала сама, и
+ * `RocketMeshes.dispose()` освобождает ровно это.
+ */
+class Owned {
+  private items: { dispose(): void }[] = [];
+  add<T extends { dispose(): void }>(x: T): T {
+    this.items.push(x);
+    return x;
+  }
+  disposeAll() {
+    for (const it of this.items) it.dispose();
+    this.items.length = 0;
+  }
+}
+
 /** Тело вращения для оживального обтекателя. */
 function ogiveGeometry(len: number, radius: number) {
   const pts: THREE.Vector2[] = [];
@@ -25,7 +46,7 @@ function ogiveGeometry(len: number, radius: number) {
   return new THREE.LatheGeometry(pts, 28);
 }
 
-function noseMesh(p: Parts): THREE.Mesh {
+function noseMesh(p: Parts, own: Owned): THREE.Mesh {
   const len = p.nose.length;
   let geo: THREE.BufferGeometry;
   switch (p.nose.id) {
@@ -50,16 +71,17 @@ function noseMesh(p: Parts): THREE.Mesh {
       geo = new THREE.CylinderGeometry(R * 0.97, R, len, 28);
       geo.translate(0, -len / 2, 0);
   }
+  own.add(geo);
   return new THREE.Mesh(geo, p.nose.id === 'flat' ? DARK : WHITE);
 }
 
-function tube(len: number, mat: THREE.Material, radius = R, topR = radius) {
+function tube(len: number, mat: THREE.Material, own: Owned, radius = R, topR = radius) {
   const g = new THREE.CylinderGeometry(topR, radius, len, 30, 1, true);
   g.translate(0, -len / 2, 0);
-  return new THREE.Mesh(g, mat);
+  return new THREE.Mesh(own.add(g), mat);
 }
 
-function finShape(p: Parts): THREE.BufferGeometry {
+function finShape(p: Parts, own: Owned): THREE.BufferGeometry {
   const f = p.fins;
   const s = new THREE.Shape();
   if (f.swept) {
@@ -76,13 +98,13 @@ function finShape(p: Parts): THREE.BufferGeometry {
   s.lineTo(0, 0);
   const geo = new THREE.ExtrudeGeometry(s, { depth: 0.16, bevelEnabled: false });
   geo.translate(0, 0, -0.08);
-  return geo;
+  return own.add(geo);
 }
 
-function nozzle(bell: number, len: number) {
+function nozzle(bell: number, len: number, own: Owned) {
   const g = new THREE.CylinderGeometry(bell * 0.32, bell, len, 22, 1, true);
   g.translate(0, -len / 2, 0);
-  const m = new THREE.Mesh(g, NOZZLE);
+  const m = new THREE.Mesh(own.add(g), NOZZLE);
   m.material.side = THREE.DoubleSide;
   return m;
 }
@@ -93,6 +115,8 @@ export interface RocketMeshes {
   upper: THREE.Group;
   plume1: THREE.Group;
   plume2: THREE.Group;
+  /** Освобождает ресурсы, созданные этой сборкой (кит и общие материалы не трогает). */
+  dispose: () => void;
 }
 
 /**
@@ -100,6 +124,7 @@ export interface RocketMeshes {
  * материалы общие, у каждой копии только своя матрица.
  */
 function fromKit(kit: Kit, p: Parts, L: Layout): RocketMeshes {
+  const own = new Owned();
   const root = new THREE.Group();
   const upper = new THREE.Group();
   const stage1 = new THREE.Group();
@@ -177,15 +202,15 @@ function fromKit(kit: Kit, p: Parts, L: Layout): RocketMeshes {
     }
   }
 
-  const plume1 = makePlume(p.s1Engine.bell * (p.s1EngineCount > 1 ? 1.5 : 1.25));
+  const plume1 = makePlume(p.s1Engine.bell * (p.s1EngineCount > 1 ? 1.5 : 1.25), own);
   plume1.position.y = -(L.s1EngineEnd + 1.6);
   stage1.add(plume1);
 
-  const plume2 = makePlume(p.s2Engine.bell * 1.1);
+  const plume2 = makePlume(p.s2Engine.bell * 1.1, own);
   plume2.position.y = -(L.s2EngineEnd + 1.2);
   upper.add(plume2);
 
-  return { root, stage1, upper, plume1, plume2 };
+  return { root, stage1, upper, plume1, plume2, dispose: () => own.disposeAll() };
 }
 
 /** Кит используется, когда загрузился; иначе — резервная сборка на примитивах. */
@@ -195,6 +220,7 @@ export function buildRocket(p: Parts, L: Layout, kit?: Kit | null): RocketMeshes
 }
 
 function fromPrimitives(p: Parts, L: Layout): RocketMeshes {
+  const own = new Owned();
   const root = new THREE.Group();
   const upper = new THREE.Group();
   const stage1 = new THREE.Group();
@@ -203,32 +229,32 @@ function fromPrimitives(p: Parts, L: Layout): RocketMeshes {
   const at = (m: THREE.Object3D, x: number) => { m.position.y = -x; return m; };
 
   // --- верхняя связка ---
-  upper.add(at(noseMesh(p), L.noseStart));
-  upper.add(at(tube(L.fairingEnd - L.fairingStart, WHITE), L.fairingStart));
-  const band = tube(0.6, ORANGE, R * 1.01);
+  upper.add(at(noseMesh(p, own), L.noseStart));
+  upper.add(at(tube(L.fairingEnd - L.fairingStart, WHITE, own), L.fairingStart));
+  const band = tube(0.6, ORANGE, own, R * 1.01);
   upper.add(at(band, L.fairingEnd - 0.1));
-  upper.add(at(tube(L.s2TankEnd - L.s2TankStart, WHITE, R * 0.98), L.s2TankStart));
-  const s2skirt = tube(L.s2EngineEnd - L.s2EngineStart, DARK, R * 0.9);
+  upper.add(at(tube(L.s2TankEnd - L.s2TankStart, WHITE, own, R * 0.98), L.s2TankStart));
+  const s2skirt = tube(L.s2EngineEnd - L.s2EngineStart, DARK, own, R * 0.9);
   upper.add(at(s2skirt, L.s2EngineStart));
-  const n2 = nozzle(p.s2Engine.bell, 2.2);
+  const n2 = nozzle(p.s2Engine.bell, 2.2, own);
   upper.add(at(n2, L.s2EngineEnd - 0.3));
 
   // --- первая ступень ---
-  stage1.add(at(tube(L.interstageEnd - L.interstageStart, DARK, R * 0.99), L.interstageStart));
-  const tank1 = tube(L.s1TankEnd - L.s1TankStart, WHITE, R);
+  stage1.add(at(tube(L.interstageEnd - L.interstageStart, DARK, own, R * 0.99), L.interstageStart));
+  const tank1 = tube(L.s1TankEnd - L.s1TankStart, WHITE, own, R);
   stage1.add(at(tank1, L.s1TankStart));
-  const stripe = tube(1.4, ORANGE, R * 1.008);
+  const stripe = tube(1.4, ORANGE, own, R * 1.008);
   stage1.add(at(stripe, L.s1TankStart + (L.s1TankEnd - L.s1TankStart) * 0.62));
-  stage1.add(at(tube(L.s1EngineEnd - L.s1EngineStart, METAL, R * 0.94), L.s1EngineStart));
+  stage1.add(at(tube(L.s1EngineEnd - L.s1EngineStart, METAL, own, R * 0.94), L.s1EngineStart));
 
   const nozzles: THREE.Object3D[] = [];
   if (p.s1EngineCount === 1) {
-    nozzles.push(at(nozzle(p.s1Engine.bell, 3.0), L.s1EngineEnd - 0.4));
+    nozzles.push(at(nozzle(p.s1Engine.bell, 3.0, own), L.s1EngineEnd - 0.4));
   } else {
     for (let i = 0; i < p.s1EngineCount; i++) {
       const a = (i / p.s1EngineCount) * Math.PI * 2;
       const off = R * 0.45;
-      const n = at(nozzle(p.s1Engine.bell * 0.8, 2.6), L.s1EngineEnd - 0.4);
+      const n = at(nozzle(p.s1Engine.bell * 0.8, 2.6, own), L.s1EngineEnd - 0.4);
       n.position.x = Math.cos(a) * off;
       n.position.z = Math.sin(a) * off;
       nozzles.push(n);
@@ -237,7 +263,7 @@ function fromPrimitives(p: Parts, L: Layout): RocketMeshes {
   nozzles.forEach((n) => stage1.add(n));
 
   if (p.fins.cna > 0) {
-    const geo = finShape(p);
+    const geo = finShape(p, own);
     for (let i = 0; i < 4; i++) {
       const holder = new THREE.Group();
       holder.position.set(0, -L.finX, 0);
@@ -250,34 +276,35 @@ function fromPrimitives(p: Parts, L: Layout): RocketMeshes {
   }
 
   // --- факелы ---
-  const plume1 = makePlume(p.s1Engine.bell * (p.s1EngineCount > 1 ? 1.5 : 1.25));
+  const plume1 = makePlume(p.s1Engine.bell * (p.s1EngineCount > 1 ? 1.5 : 1.25), own);
   plume1.position.y = -(L.s1EngineEnd + 1.6);
   stage1.add(plume1);
 
-  const plume2 = makePlume(p.s2Engine.bell * 1.1);
+  const plume2 = makePlume(p.s2Engine.bell * 1.1, own);
   plume2.position.y = -(L.s2EngineEnd + 1.2);
   upper.add(plume2);
 
-  return { root, stage1, upper, plume1, plume2 };
+  return { root, stage1, upper, plume1, plume2, dispose: () => own.disposeAll() };
 }
 
-function makePlume(radius: number) {
+/** Факел свой у каждой сборки: его размер зависит от сопла выбранного двигателя. */
+function makePlume(radius: number, own: Owned) {
   const g = new THREE.Group();
-  const core = new THREE.Mesh(
-    new THREE.ConeGeometry(radius * 0.55, 11, 18, 1, true),
-    new THREE.MeshBasicMaterial({ color: 0xfff4d2, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false }),
-  );
+  const cone = (r: number, len: number, color: number, opacity: number) =>
+    new THREE.Mesh(
+      own.add(new THREE.ConeGeometry(r, len, 18, 1, true)),
+      own.add(new THREE.MeshBasicMaterial({ color, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false })),
+    );
+
+  const core = cone(radius * 0.55, 11, 0xfff4d2, 0.8);
   core.rotation.x = Math.PI;
   core.position.y = -5.5;
-  const halo = new THREE.Mesh(
-    new THREE.ConeGeometry(radius * 1.15, 22, 18, 1, true),
-    new THREE.MeshBasicMaterial({ color: 0xff7a2a, transparent: true, opacity: 0.26, blending: THREE.AdditiveBlending, depthWrite: false }),
-  );
+  const halo = cone(radius * 1.15, 22, 0xff7a2a, 0.26);
   halo.rotation.x = Math.PI;
   halo.position.y = -11;
   const glow = new THREE.Mesh(
-    new THREE.SphereGeometry(radius * 0.75, 14, 10),
-    new THREE.MeshBasicMaterial({ color: 0xffc27a, transparent: true, opacity: 0.32, blending: THREE.AdditiveBlending, depthWrite: false }),
+    own.add(new THREE.SphereGeometry(radius * 0.75, 14, 10)),
+    own.add(new THREE.MeshBasicMaterial({ color: 0xffc27a, transparent: true, opacity: 0.32, blending: THREE.AdditiveBlending, depthWrite: false })),
   );
   g.add(core, halo, glow);
   g.visible = false;

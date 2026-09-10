@@ -26,22 +26,31 @@ const PHASE_RU: Record<string, string> = {
 export interface HudActions {
   cycleCamera: () => void;
   toggleAutopilot: () => void;
+  togglePause: () => void;
   warpDown: () => void;
   warpUp: () => void;
   pitch: (v: number) => void;
   throttle: (d: number) => void;
 }
 
-interface Props { t: Telemetry; warp: number; camera: string; mobile: boolean; actions: HudActions }
+interface Props {
+  t: Telemetry;
+  warp: number;
+  paused: boolean;
+  camera: string;
+  mobile: boolean;
+  actions: HudActions;
+}
 
-export default function HUD({ t, warp, camera, mobile, actions }: Props) {
-  return mobile ? <MobileHUD t={t} warp={warp} camera={camera} actions={actions} />
-    : <DesktopHUD t={t} warp={warp} camera={camera} />;
+export default function HUD({ t, warp, paused, camera, mobile, actions }: Props) {
+  return mobile
+    ? <MobileHUD t={t} warp={warp} paused={paused} camera={camera} actions={actions} />
+    : <DesktopHUD t={t} warp={warp} paused={paused} camera={camera} />;
 }
 
 /* ---------------- телефон ---------------- */
 
-function MobileHUD({ t, warp, camera, actions }: Omit<Props, 'mobile'>) {
+function MobileHUD({ t, warp, paused, camera, actions }: Omit<Props, 'mobile'>) {
   const last = t.events[t.events.length - 1];
   const qPct = Math.min(100, (t.q / 62_000) * 100);
   return (
@@ -62,7 +71,7 @@ function MobileHUD({ t, warp, camera, actions }: Omit<Props, 'mobile'>) {
         </div>
         <div className="bar"><div className="bar-fill bar-q" style={{ width: `${qPct}%` }} /></div>
         <div className="m-phase">
-          <span>T+{fmt(t.time)} с · {PHASE_RU[t.phase] ?? t.phase}</span>
+          <span>T+{fmt(t.time)} с · {paused ? 'Пауза' : PHASE_RU[t.phase] ?? t.phase}</span>
           <span>{t.stage === 0 ? '1 ступень' : t.stage === 1 ? '2 ступень' : 'без тяги'}</span>
         </div>
         {last && <div className={`m-event log-${last.kind}`}>{last.text}</div>}
@@ -79,6 +88,8 @@ function MobileHUD({ t, warp, camera, actions }: Omit<Props, 'mobile'>) {
           <button className={`tbtn${t.autopilot ? ' tbtn-on' : ''}`} onClick={actions.toggleAutopilot}>
             {t.autopilot ? 'Авто' : 'Ручное'}
           </button>
+          <button className={`tbtn${paused ? ' tbtn-on' : ''}`} onClick={actions.togglePause}
+            aria-pressed={paused}>{paused ? '▶' : '❚❚'}</button>
           <button className="tbtn" onClick={actions.warpDown}>−</button>
           <button className="tbtn tbtn-warp">×{warp}</button>
           <button className="tbtn" onClick={actions.warpUp}>+</button>
@@ -109,7 +120,7 @@ function Cell({ label, value, small, warn }: { label: string; value: string; sma
 
 /* ---------------- десктоп ---------------- */
 
-function DesktopHUD({ t, warp, camera }: { t: Telemetry; warp: number; camera: string }) {
+function DesktopHUD({ t, warp, paused, camera }: Omit<Props, 'mobile' | 'actions'>) {
   const qPct = Math.min(100, (t.q / 62_000) * 100);
   const aoaDeg = (t.aoa * 180) / Math.PI;
   return (
@@ -152,7 +163,9 @@ function DesktopHUD({ t, warp, camera }: { t: Telemetry; warp: number; camera: s
         <div className="stage-row">
           <span className={`chip ${t.stage === 0 ? 'chip-on' : 'chip-off'}`}>1 ступень</span>
           <span className={`chip ${t.stage === 1 ? 'chip-on' : 'chip-off'}`}>2 ступень</span>
-          <span className="chip chip-mode">{PHASE_RU[t.phase] ?? t.phase}</span>
+          <span className={`chip ${paused ? 'chip-warn' : 'chip-mode'}`}>
+            {paused ? 'Пауза' : PHASE_RU[t.phase] ?? t.phase}
+          </span>
           <span className={`chip ${t.autopilot ? 'chip-on' : 'chip-warn'}`}>
             {t.autopilot ? 'Автопилот' : 'Ручное'}
           </span>

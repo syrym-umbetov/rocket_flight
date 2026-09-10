@@ -6,8 +6,8 @@ import {
   clamp, density, gravityAt, pressureRatio, soundSpeed,
 } from './constants';
 import {
-  DIAMETER, REF_AREA, analyze, baseCd, centerOfPressure, layout, massProps, resolveParts,
-  type Design, type DesignStats,
+  DIAMETER, REF_AREA, analyze, baseCd, centerOfPressure, massProps,
+  type Design, type DesignStats, type MassProps,
 } from './design';
 
 export type Phase =
@@ -75,6 +75,35 @@ export interface SimState {
 
 const UP0 = new Vector3(0, 1, 0);
 
+/**
+ * Пул рабочих векторов.
+ *
+ * `step()` вызывается до 2500 раз за кадр при ускорении времени, поэтому
+ * каждый `new Vector3()` здесь превращается в десятки тысяч объектов на кадр
+ * и заметные паузы сборщика мусора. Вся математика шага идёт по заранее
+ * выделенным векторам; у каждой функции свой набор, чтобы вложенные вызовы
+ * не затирали чужие промежуточные значения.
+ */
+const _up = new Vector3();
+const _axis = new Vector3();
+const _east = new Vector3();
+const _targetDir = new Vector3();
+const _force = new Vector3();
+const _torque = new Vector3();
+const _vAir = new Vector3();
+const _vhat = new Vector3();
+const _perp = new Vector3();
+const _arm = new Vector3();
+const _cmd = new Vector3();
+const _tmp = new Vector3();
+const _dqAxis = new Vector3();
+const _dq = new Quaternion();
+const _mp: MassProps = { mass: 0, cm: 0 };
+
+const _sepUp = new Vector3();
+const _sepTmp = new Vector3();
+const _sepDq = new Quaternion();
+
 export function initialState(): SimState {
   return {
     t: 0,
@@ -116,19 +145,28 @@ export function createFlight(design: Design): { state: SimState; stats: DesignSt
   return { state: s, stats };
 }
 
+const _orbH = new Vector3();
+const _orbE = new Vector3();
+
 /** Оскулирующие элементы орбиты из вектора состояния. */
-export function orbitOf(pos: Vector3, vel: Vector3): Orbit {
+export function orbitOf(
+  pos: Vector3,
+  vel: Vector3,
+  out: Orbit = { apoapsis: 0, periapsis: 0, eccentricity: 0, period: 0, timeToApo: 0 },
+): Orbit {
   const r = pos.length();
   const v = vel.length();
-  if (r < 1) return { apoapsis: 0, periapsis: 0, eccentricity: 0, period: 0, timeToApo: 0 };
+  if (r < 1) {
+    out.apoapsis = 0; out.periapsis = 0; out.eccentricity = 0; out.period = 0; out.timeToApo = 0;
+    return out;
+  }
   const energy = (v * v) / 2 - MU / r;
   const a = -MU / (2 * energy);
   // вектор эксцентриситета
-  const h = new Vector3().crossVectors(pos, vel);
-  const evec = new Vector3().crossVectors(vel, h).multiplyScalar(1 / MU)
-    .sub(pos.clone().multiplyScalar(1 / r));
+  const h = _orbH.crossVectors(pos, vel);
+  const evec = _orbE.crossVectors(vel, h).multiplyScalar(1 / MU).addScaledVector(pos, -1 / r);
   const e = evec.length();
-  let apo = -Infinity, peri = -Infinity, period = Infinity, timeToApo = Infinity;
+  let apo: number, peri: number, period = Infinity, timeToApo = Infinity;
   if (energy < 0 && a > 0) {
     apo = a * (1 + e) - R_PLANET;
     peri = a * (1 - e) - R_PLANET;
@@ -150,77 +188,90 @@ export function orbitOf(pos: Vector3, vel: Vector3): Orbit {
     peri = a * (1 - e) - R_PLANET;
     timeToApo = Infinity;
   }
-  return { apoapsis: apo, periapsis: peri, eccentricity: e, period, timeToApo };
+  out.apoapsis = apo;
+  out.periapsis = peri;
+  out.eccentricity = e;
+  out.period = period;
+  out.timeToApo = timeToApo;
+  return out;
 }
 
 /** Единичный вектор «на восток» в плоскости запуска. */
-function eastOf(pos: Vector3, out: Vector3) {
-  const up = out.copy(pos).normalize();
-  return new Vector3(up.y, -up.x, 0).normalize();
+function eastOf(pos: Vector3, out: Vector3): Vector3 {
+  const len = pos.length() || 1;
+  return out.set(pos.y / len, -pos.x / len, 0).normalize();
 }
 
 const GIMBAL_RATE = 1.25;   // полный ход привода примерно за 0.8 с
 const APO_TARGET = 105_000;
 
+const _windTmp = new Vector3();
+
 /**
  * Ветер: струйное течение с максимумом на 10–11 км плюс порывы.
  * Именно он «пробует на прочность» запас устойчивости.
  */
-function windAt(alt: number, t: number, east: Vector3, up: Vector3): Vector3 {
-  if (alt < 20 || alt > 26_000) return new Vector3();
+function windAt(alt: number, t: number, east: Vector3, up: Vector3, out: Vector3): Vector3 {
+  if (alt < 20 || alt > 26_000) return out.set(0, 0, 0);
   const jet = 34 * Math.exp(-Math.pow((alt - 10_500) / 6_200, 2));
   const gust =
     5.5 * Math.sin(t * 0.63 + 0.4) +
     3.2 * Math.sin(t * 1.77 + 1.9) +
     2.1 * Math.sin(t * 3.41 + 0.7);
   const lateral = 2.4 * Math.sin(t * 0.91 + 2.3);
-  const w = east.clone().multiplyScalar(jet + gust);
-  w.add(new Vector3().crossVectors(up, east).multiplyScalar(lateral));
-  return w;
+  out.copy(east).multiplyScalar(jet + gust);
+  out.add(_windTmp.crossVectors(up, east).multiplyScalar(lateral));
+  return out;
 }
 
 interface Guidance { target: Vector3; throttle: number }
 
-function guidance(s: SimState, stats: DesignStats): Guidance {
-  const up = s.pos.clone().normalize();
-  const east = eastOf(s.pos, new Vector3());
-  const alt = s.alt;
-  const prograde = s.speed > 12 ? s.vel.clone().normalize() : up.clone();
-  const horiz = new Vector3().copy(east);
+const _gUp = new Vector3();
+const _gEast = new Vector3();
+const _gPro = new Vector3();
+const _gPerp = new Vector3();
+const _guidance: Guidance = { target: new Vector3(), throttle: 1 };
 
-  // угол от вертикали для вектора
-  const thetaOf = (v: Vector3) => Math.acos(clamp(v.dot(up), -1, 1));
-  const dirAt = (theta: number) =>
-    up.clone().multiplyScalar(Math.cos(theta)).add(east.clone().multiplyScalar(Math.sin(theta))).normalize();
+function guidance(s: SimState): Guidance {
+  const up = _gUp.copy(s.pos).normalize();
+  const east = eastOf(s.pos, _gEast);
+  const alt = s.alt;
+  const prograde = s.speed > 12 ? _gPro.copy(s.vel).normalize() : _gPro.copy(up);
+  const target = _guidance.target;
+
+  /** Направление под углом theta от вертикали в плоскости «верх–восток». */
+  const dirAt = (theta: number, out: Vector3) =>
+    out.copy(up).multiplyScalar(Math.cos(theta)).addScaledVector(east, Math.sin(theta)).normalize();
 
   if (s.phase === 'coast') {
-    return { target: horiz, throttle: 0 };
+    target.copy(east);
+    _guidance.throttle = 0;
+    return _guidance;
   }
   if (s.phase === 'circularize') {
     // тангаж удерживает вертикальную скорость около нуля: вся тяга идёт в разгон
     const theta = clamp(-s.vertSpeed * 0.022, -0.42, 0.42);
-    const t = horiz.clone().multiplyScalar(Math.cos(theta))
-      .add(up.clone().multiplyScalar(Math.sin(theta))).normalize();
-    return { target: t, throttle: 1 };
+    target.copy(east).multiplyScalar(Math.cos(theta)).addScaledVector(up, Math.sin(theta)).normalize();
+    _guidance.throttle = 1;
+    return _guidance;
   }
 
-  let target: Vector3;
   let throttle = 1;
 
   if (alt < 500) {
-    target = up.clone();
+    target.copy(up);
   } else if (alt < 2600) {
     // манёвр «кик»: наклон на 10° к востоку
     const f = (alt - 500) / 2100;
-    target = dirAt((10 * Math.PI / 180) * f);
+    dirAt((10 * Math.PI / 180) * f, target);
   } else {
     // гравитационный разворот: следуем за скоростным вектором, подмешивая программу
     const prog = clamp((alt - 2600) / 46_000, 0, 1);
     const thetaProgram = (Math.PI / 2) * Math.pow(prog, 0.62);
-    const thetaPro = thetaOf(prograde);
+    const thetaPro = Math.acos(clamp(prograde.dot(up), -1, 1));
     let theta = thetaPro * 0.62 + thetaProgram * 0.38;
     theta = clamp(theta, 0, 1.53);
-    target = dirAt(theta);
+    dirAt(theta, target);
   }
 
   // ограничение угла атаки: реальная система наведения не позволяет
@@ -230,11 +281,11 @@ function guidance(s: SimState, stats: DesignStats): Guidance {
     const ang = Math.acos(cosAng);
     const maxAoA = 0.2;
     if (ang > maxAoA) {
-      const perp = target.clone().sub(prograde.clone().multiplyScalar(cosAng));
+      const perp = _gPerp.copy(target).addScaledVector(prograde, -cosAng);
       if (perp.lengthSq() > 1e-12) {
         perp.normalize();
-        target = prograde.clone().multiplyScalar(Math.cos(maxAoA))
-          .add(perp.multiplyScalar(Math.sin(maxAoA))).normalize();
+        target.copy(prograde).multiplyScalar(Math.cos(maxAoA))
+          .addScaledVector(perp, Math.sin(maxAoA)).normalize();
       }
     }
   }
@@ -246,7 +297,8 @@ function guidance(s: SimState, stats: DesignStats): Guidance {
   if (apo > APO_TARGET * 0.97 && alt < ATMO_TOP) throttle = Math.min(throttle, 0.35);
   if (apo > APO_TARGET) throttle = 0;
 
-  return { target, throttle };
+  _guidance.throttle = throttle;
+  return _guidance;
 }
 
 function addEvent(s: SimState, text: string, kind: FlightEvent['kind'] = 'info') {
@@ -271,7 +323,7 @@ export function step(s: SimState, stats: DesignStats, dt: number): void {
   const L = stats.layout;
 
   // --- массы и центровка ---
-  const mp = massProps(p, L, s.stage === 0 ? 0 : 1, s.fuel1, s.fuel2);
+  const mp = massProps(p, L, s.stage === 0 ? 0 : 1, s.fuel1, s.fuel2, _mp);
   const mass = Math.max(mp.mass, 1);
   s.mass = mass;
   const { cp, cna } = centerOfPressure(p, L, s.stage === 0 ? 0 : 1);
@@ -286,8 +338,8 @@ export function step(s: SimState, stats: DesignStats, dt: number): void {
   const alt = r - R_PLANET;
   s.alt = alt;
 
-  const up = s.pos.clone().multiplyScalar(1 / r);
-  const axis = UP0.clone().applyQuaternion(s.quat).normalize(); // направление носа
+  const up = _up.copy(s.pos).multiplyScalar(1 / r);
+  const axis = _axis.copy(UP0).applyQuaternion(s.quat).normalize(); // направление носа
 
   // --- двигатель ---
   let thrustMag = 0;
@@ -313,17 +365,21 @@ export function step(s: SimState, stats: DesignStats, dt: number): void {
   s.thrust = thrustMag;
 
   // --- наведение ---
-  const g = s.autopilot ? guidance(s, stats) : { target: axis.clone(), throttle: s.throttle };
-  if (s.autopilot && s.phase !== 'prelaunch') s.throttle = g.throttle;
+  if (s.autopilot) {
+    const g = guidance(s);
+    _targetDir.copy(g.target);
+    if (s.phase !== 'prelaunch') s.throttle = g.throttle;
+  } else {
+    _targetDir.copy(axis);
+  }
+  const targetDir = _targetDir;
 
-  let targetDir = g.target.clone();
   if (!s.autopilot && s.manualPitch !== 0) {
     // ручное управление: доворот в плоскости «верх–восток»
-    const east = eastOf(s.pos, new Vector3());
+    const east = eastOf(s.pos, _east);
     const cur = Math.acos(clamp(axis.dot(up), -1, 1));
     const theta = clamp(cur + s.manualPitch * 0.5, -0.2, 1.75);
-    targetDir = up.clone().multiplyScalar(Math.cos(theta))
-      .add(east.clone().multiplyScalar(Math.sin(theta))).normalize();
+    targetDir.copy(up).multiplyScalar(Math.cos(theta)).addScaledVector(east, Math.sin(theta)).normalize();
   }
 
   // --- аэродинамика ---
@@ -336,18 +392,18 @@ export function step(s: SimState, stats: DesignStats, dt: number): void {
   if (q > s.maxQ) s.maxQ = q;
   s.mach = speed / soundSpeed(alt);
 
-  const force = new Vector3();
-  const torque = new Vector3();
+  const force = _force.set(0, 0, 0);
+  const torque = _torque.set(0, 0, 0);
 
   // скорость относительно воздуха — с учётом ветра
-  const eastDir = eastOf(s.pos, new Vector3());
-  s.wind.copy(rho > 1e-6 ? windAt(alt, s.t, eastDir, up) : new Vector3());
-  const vAir = s.vel.clone().sub(s.wind);
+  if (rho > 1e-6) windAt(alt, s.t, eastOf(s.pos, _east), up, s.wind);
+  else s.wind.set(0, 0, 0);
+  const vAir = _vAir.copy(s.vel).sub(s.wind);
   const vAirLen = vAir.length();
 
   let aoa = 0;
   if (vAirLen > 1 && rho > 1e-7) {
-    const vhat = vAir.clone().multiplyScalar(1 / vAirLen);
+    const vhat = _vhat.copy(vAir).multiplyScalar(1 / vAirLen);
     const cosA = clamp(axis.dot(vhat), -1, 1);
     aoa = Math.acos(cosA);
     const sinA = Math.sin(aoa);
@@ -356,24 +412,23 @@ export function step(s: SimState, stats: DesignStats, dt: number): void {
     const qAir = 0.5 * rho * vAirLen * vAirLen;
     const transonic = 1 + 1.05 * p.nose.wave * Math.exp(-Math.pow((s.mach - 1.08) / 0.34, 2));
     const cd = (baseCd(p, s.stage === 0 ? 0 : 1) * transonic) + 1.9 * sinA * sinA;
-    const drag = vhat.clone().multiplyScalar(-qAir * REF_AREA * cd);
-    force.add(drag);
+    force.addScaledVector(vhat, -qAir * REF_AREA * cd);
 
     // нормальная сила в ЦД
     // направление набегающего потока поперёк корпуса: сила прижимает корпус
     // в сторону, противоположную поперечной составляющей вектора скорости
-    const perp = vhat.clone().sub(axis.clone().multiplyScalar(cosA));
+    const perp = _perp.copy(vhat).addScaledVector(axis, -cosA);
     if (perp.lengthSq() > 1e-12) {
       perp.normalize();
       const fn = perp.multiplyScalar(-qAir * REF_AREA * cna * Math.min(sinA, 0.85));
       force.add(fn);
-      const arm = axis.clone().multiplyScalar(-(cp - cmX)); // от ЦМ к ЦД
-      torque.add(new Vector3().crossVectors(arm, fn));
+      const arm = _arm.copy(axis).multiplyScalar(-(cp - cmX)); // от ЦМ к ЦД
+      torque.add(_tmp.crossVectors(arm, fn));
     }
 
     // аэродинамическое демпфирование
     const dampCoef = 0.5 * rho * vAirLen * REF_AREA * (cna * 0.35) * Math.pow(Math.max(cp - cmX, 1.5), 2);
-    torque.add(s.angVel.clone().multiplyScalar(-dampCoef));
+    torque.addScaledVector(s.angVel, -dampCoef);
 
     s.heatFlux = 1.4e-4 * rho * Math.pow(vAirLen, 3);
     s.heatLoad += (s.heatFlux / p.nose.heatTol) * dt;
@@ -385,9 +440,9 @@ export function step(s: SimState, stats: DesignStats, dt: number): void {
 
   // --- управление вектором тяги ---
   if (thrustMag > 0 && gimbalMax > 0) {
-    const err = new Vector3().crossVectors(axis, targetDir); // ось поворота × sin(ошибки)
     const kp = 3.2, kd = 7.5;
-    const cmd = err.multiplyScalar(kp).sub(s.angVel.clone().multiplyScalar(kd));
+    // ось поворота × sin(ошибки), с демпфированием по угловой скорости
+    const cmd = _cmd.crossVectors(axis, targetDir).multiplyScalar(kp).addScaledVector(s.angVel, -kd);
     const mag = cmd.length();
     if (mag > 1) cmd.multiplyScalar(1 / mag);
     // привод не мгновенный: ограничение по скорости перекладки сопла
@@ -398,26 +453,25 @@ export function step(s: SimState, stats: DesignStats, dt: number): void {
     if (s.gimbal.length() > 1) s.gimbal.normalize();
     const lever = Math.max(engineX - cmX, 1);
     const maxTorque = thrustMag * Math.sin(gimbalMax) * lever;
-    torque.add(s.gimbal.clone().multiplyScalar(maxTorque));
+    torque.addScaledVector(s.gimbal, maxTorque);
   } else if (s.stage === 1 && s.phase !== 'prelaunch') {
     // микродвигатели ориентации на верхней ступени
-    const err = new Vector3().crossVectors(axis, targetDir);
-    const cmd = err.multiplyScalar(2.0).sub(s.angVel.clone().multiplyScalar(6.0));
+    const cmd = _cmd.crossVectors(axis, targetDir).multiplyScalar(2.0).addScaledVector(s.angVel, -6.0);
     const rcs = 12_000;
     const mag = cmd.length();
-    if (mag > 1e-9) torque.add(cmd.multiplyScalar((Math.min(mag, 1) * rcs) / mag));
+    if (mag > 1e-9) torque.addScaledVector(cmd, (Math.min(mag, 1) * rcs) / mag);
   }
 
   // --- тяга ---
-  if (thrustMag > 0) force.add(axis.clone().multiplyScalar(thrustMag));
+  if (thrustMag > 0) force.addScaledVector(axis, thrustMag);
 
   // --- гравитация ---
-  force.add(up.clone().multiplyScalar(-gravityAt(r) * mass));
+  const gAcc = gravityAt(r);
+  force.addScaledVector(up, -gAcc * mass);
 
   // --- интегрирование ---
   const acc = force.multiplyScalar(1 / mass);
-  const nonGrav = acc.clone().add(up.clone().multiplyScalar(gravityAt(r)));
-  s.gForce = nonGrav.length() / 9.80665;
+  s.gForce = _tmp.copy(acc).addScaledVector(up, gAcc).length() / 9.80665;
   if (s.gForce > s.maxG) s.maxG = s.gForce;
 
   const onPad = s.phase === 'prelaunch' || (alt < 0.6 && s.vertSpeed <= 0.01);
@@ -448,8 +502,8 @@ export function step(s: SimState, stats: DesignStats, dt: number): void {
   const wLen = s.angVel.length();
   if (wLen > 6) s.angVel.multiplyScalar(6 / wLen);
   if (wLen > 1e-9) {
-    const dq = new Quaternion().setFromAxisAngle(s.angVel.clone().normalize(), wLen * dt);
-    s.quat.premultiply(dq).normalize();
+    _dq.setFromAxisAngle(_dqAxis.copy(s.angVel).normalize(), wLen * dt);
+    s.quat.premultiply(_dq).normalize();
   }
 
   // расход топлива
@@ -464,24 +518,25 @@ export function step(s: SimState, stats: DesignStats, dt: number): void {
   if (s.separated && s.sepPos && s.sepVel && s.sepQuat && s.sepAngVel) {
     const rs = s.sepPos.length();
     if (rs > R_PLANET - 200) {
-      const upS = s.sepPos.clone().multiplyScalar(1 / rs);
+      const upS = _sepUp.copy(s.sepPos).multiplyScalar(1 / rs);
       s.sepVel.addScaledVector(upS, -gravityAt(rs) * dt);
       const rhoS = density(rs - R_PLANET);
       const vs = s.sepVel.length();
       if (rhoS > 1e-6 && vs > 1) {
         const dragS = 0.5 * rhoS * vs * vs * REF_AREA * 1.2 / 6000;
-        s.sepVel.addScaledVector(s.sepVel.clone().normalize(), -dragS * dt);
+        s.sepVel.addScaledVector(_sepTmp.copy(s.sepVel).normalize(), -dragS * dt);
       }
       s.sepPos.addScaledVector(s.sepVel, dt);
       const w = s.sepAngVel.length();
       if (w > 1e-6) {
-        s.sepQuat.premultiply(new Quaternion().setFromAxisAngle(s.sepAngVel.clone().normalize(), w * dt)).normalize();
+        _sepDq.setFromAxisAngle(_sepTmp.copy(s.sepAngVel).normalize(), w * dt);
+        s.sepQuat.premultiply(_sepDq).normalize();
       }
     }
   }
 
   // --- орбита ---
-  s.orbit = orbitOf(s.pos, s.vel);
+  orbitOf(s.pos, s.vel, s.orbit);
 
   // --- логика полёта ---
   updatePhase(s, stats);
@@ -505,7 +560,7 @@ function updatePhase(s: SimState, stats: DesignStats) {
     s.separated = true;
     s.sepPos = s.pos.clone();
     // толкатели разводят ступени: отработавший блок заметно отстаёт
-    const sepAxis = new Vector3(0, 1, 0).applyQuaternion(s.quat).normalize();
+    const sepAxis = UP0.clone().applyQuaternion(s.quat).normalize();
     s.sepVel = s.vel.clone().addScaledVector(sepAxis, -9);
     s.sepQuat = s.quat.clone();
     s.sepAngVel = new Vector3(0.12, 0, 0.35);
