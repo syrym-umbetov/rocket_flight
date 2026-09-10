@@ -11,7 +11,7 @@ import {
   createWorld, makeExplosion, pushTrail, resetTrail, triggerExplosion, updateExplosion,
   type Explosion, type World,
 } from '@/lib/scene';
-import { useMobile } from '@/lib/useMobile';
+import { isMobileNow, useMobile } from '@/lib/useMobile';
 import BuilderPanel from './BuilderPanel';
 import HUD, { type HudActions } from './HUD';
 import type { Telemetry } from './types';
@@ -96,7 +96,8 @@ export default function Game() {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const world = createWorld(canvas, mobileRef.current);
+    // сцена строится раньше, чем useMobile отдаст ответ, поэтому спрашиваем медиа-запрос напрямую
+    const world = createWorld(canvas, isMobileNow());
     worldRef.current = world;
 
     const { state, stats: st } = createFlight(DEFAULT_DESIGN);
@@ -257,9 +258,12 @@ export default function Game() {
       const camAlt = world.camera.position.length() - R_PLANET;
       const skyT = Math.exp(-Math.max(camAlt, 0) / 13_000);
       const atmoMat = world.atmo.material as THREE.MeshBasicMaterial;
-      atmoMat.opacity = 0.13 + 0.72 * Math.pow(skyT, 1.15);
+      atmoMat.opacity = 0.88 * Math.pow(skyT, 1.1);
       atmoMat.color.setRGB(0.28 + 0.26 * skyT, 0.55 + 0.19 * skyT, 0.86 + 0.1 * skyT);
       (world.stars.material as THREE.PointsMaterial).opacity = 1 - skyT * 0.95;
+      // ободок атмосферы имеет смысл только когда виден край диска
+      const glowMat = world.glow.material as THREE.ShaderMaterial;
+      glowMat.uniforms.intensity.value = 0.75 * Math.min(1, Math.max(0, (camAlt - 85_000) / 90_000));
 
       world.renderer.render(world.scene, world.camera);
 

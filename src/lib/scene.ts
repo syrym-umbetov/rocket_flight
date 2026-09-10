@@ -2,75 +2,85 @@
 
 import * as THREE from 'three';
 import { ATMO_TOP, R_PLANET } from './constants';
+import { generatePlanet } from './planet';
 
-/** Процедурная карта планеты: океаны, материки, шапки полюсов. */
-function planetTexture(): THREE.Texture {
-  const w = 1024, h = 512;
-  const cv = document.createElement('canvas');
-  cv.width = w; cv.height = h;
-  const ctx = cv.getContext('2d')!;
-
-  const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, '#dceaf5');
-  grad.addColorStop(0.16, '#1b4d80');
-  grad.addColorStop(0.5, '#12395f');
-  grad.addColorStop(0.84, '#1b4d80');
-  grad.addColorStop(1, '#dceaf5');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, w, h);
-
-  // материки — наложение мягких пятен
-  let seed = 20250605;
-  const rnd = () => {
-    seed = (seed * 1664525 + 1013904223) % 4294967296;
-    return seed / 4294967296;
-  };
-  const land = ['#2f6b38', '#3c7a3e', '#5d7a3a', '#6b6f3c', '#7a6a44'];
-  for (let i = 0; i < 240; i++) {
-    const cx = rnd() * w;
-    const cy = h * 0.12 + rnd() * h * 0.76;
-    const r = 14 + rnd() * 70;
-    ctx.globalAlpha = 0.55;
-    ctx.fillStyle = land[(rnd() * land.length) | 0];
-    ctx.beginPath();
-    for (let a = 0; a < Math.PI * 2; a += 0.35) {
-      const rr = r * (0.62 + rnd() * 0.65);
-      const x = cx + Math.cos(a) * rr;
-      const y = cy + Math.sin(a) * rr * 0.7;
-      a === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    }
-    ctx.closePath();
-    ctx.fill();
-  }
-  ctx.globalAlpha = 1;
-  const tex = new THREE.CanvasTexture(cv);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 4;
-  return tex;
+function dataTexture(data: Uint8Array, w: number, h: number, srgb: boolean) {
+  const t = new THREE.DataTexture(data, w, h, THREE.RGBAFormat);
+  if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+  t.flipY = true;                       // как у CanvasTexture: строка 0 — север
+  t.wrapS = THREE.RepeatWrapping;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.magFilter = THREE.LinearFilter;
+  t.generateMipmaps = true;
+  t.anisotropy = 8;
+  t.needsUpdate = true;
+  return t;
 }
 
-function cloudTexture(): THREE.Texture {
-  const w = 1024, h = 512;
-  const cv = document.createElement('canvas');
-  cv.width = w; cv.height = h;
-  const ctx = cv.getContext('2d')!;
-  ctx.clearRect(0, 0, w, h);
-  let seed = 777;
-  const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
-  for (let i = 0; i < 170; i++) {
-    const cx = rnd() * w, cy = rnd() * h;
-    const r = 8 + rnd() * 42;
-    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-    g.addColorStop(0, 'rgba(255,255,255,0.62)');
-    g.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  const tex = new THREE.CanvasTexture(cv);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
+/** Свечение атмосферы по краю диска: френелевский ободок на внешней сфере. */
+function atmosphereGlow(radius: number) {
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      glowColor: { value: new THREE.Color(0x74baff) },
+      sunDir: { value: new THREE.Vector3(0, 1, 0) },
+      intensity: { value: 0 },
+    },
+    vertexShader: `
+      varying vec3 vN;
+      varying vec3 vP;
+      void main() {
+        vN = normalize(mat3(modelMatrix) * normal);
+        vP = (modelMatrix * vec4(position, 1.0)).xyz;
+        gl_Position = projectionMatrix * viewMatrix * vec4(vP, 1.0);
+      }`,
+    fragmentShader: `
+      uniform vec3 glowColor;
+      uniform vec3 sunDir;
+      uniform float intensity;
+      varying vec3 vN;
+      varying vec3 vP;
+      void main() {
+        vec3 V = normalize(cameraPosition - vP);
+        float rim = pow(clamp(1.0 - abs(dot(V, normalize(vN))), 0.0, 1.0), 4.2);
+        float lit = clamp(dot(normalize(vN), sunDir) * 0.75 + 0.4, 0.0, 1.0);
+        float a = rim * intensity * lit;
+        gl_FragColor = vec4(glowColor * a, a);
+      }`,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.BackSide,
+  });
+  return new THREE.Mesh(new THREE.SphereGeometry(radius, 64, 40), mat);
+}
+
+/** Огни городов: видны только на ночной стороне. */
+function nightLights(radius: number, map: THREE.Texture) {
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { lightsMap: { value: map }, sunDir: { value: new THREE.Vector3(0, 1, 0) } },
+    vertexShader: `
+      varying vec3 vN;
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        vN = normalize(mat3(modelMatrix) * normal);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: `
+      uniform sampler2D lightsMap;
+      uniform vec3 sunDir;
+      varying vec3 vN;
+      varying vec2 vUv;
+      void main() {
+        float night = smoothstep(0.10, -0.20, dot(normalize(vN), sunDir));
+        vec3 c = texture2D(lightsMap, vUv).rgb;
+        gl_FragColor = vec4(c * night, 1.0);
+      }`,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  return new THREE.Mesh(new THREE.SphereGeometry(radius, 64, 40), mat);
 }
 
 function starField(n: number): THREE.Points {
@@ -142,6 +152,8 @@ export interface World {
   planet: THREE.Mesh;
   clouds: THREE.Mesh;
   atmo: THREE.Mesh;
+  glow: THREE.Mesh;
+  night: THREE.Mesh;
   pad: THREE.Group;
   sun: THREE.DirectionalLight;
   trail: THREE.Line;
@@ -170,28 +182,52 @@ export function createWorld(canvas: HTMLCanvasElement, lowPower = false): World 
   (stars.material as THREE.PointsMaterial).transparent = true;
   scene.add(stars);
 
+  const maps = generatePlanet(lowPower ? 512 : 896);
+  const tex = (d: Uint8Array, srgb: boolean) => dataTexture(d, maps.w, maps.h, srgb);
   const planet = new THREE.Mesh(
-    new THREE.SphereGeometry(R_PLANET, lowPower ? 48 : 72, lowPower ? 32 : 48),
-    new THREE.MeshStandardMaterial({ map: planetTexture(), roughness: 0.95, metalness: 0 }),
+    new THREE.SphereGeometry(R_PLANET, lowPower ? 64 : 112, lowPower ? 40 : 72),
+    new THREE.MeshStandardMaterial({
+      map: tex(maps.color, true),
+      bumpMap: tex(maps.height, false),
+      bumpScale: lowPower ? 8 : 16,
+      roughnessMap: tex(maps.rough, false),
+      roughness: 1,
+      metalness: 0,
+    }),
   );
   scene.add(planet);
 
+  const night = nightLights(R_PLANET + 300, tex(maps.lights, true));
+  scene.add(night);
+
+  // Полюса сферы по умолчанию смотрят вдоль ±Y — то есть точно в стартовую
+  // площадку и в плоскость орбиты. Разворачиваем глобус так, чтобы трасса
+  // полёта шла по экватору, а не через ледяные шапки.
+  const TILT = Math.PI / 2;
+  planet.rotation.x = TILT;
+  night.rotation.x = TILT;
+
   const clouds = new THREE.Mesh(
-    new THREE.SphereGeometry(R_PLANET + 6000, lowPower ? 48 : 72, lowPower ? 32 : 48),
-    new THREE.MeshStandardMaterial({ map: cloudTexture(), transparent: true, opacity: 0.42, depthWrite: false }),
+    new THREE.SphereGeometry(R_PLANET + 7000, lowPower ? 48 : 80, lowPower ? 32 : 52),
+    new THREE.MeshStandardMaterial({
+      map: tex(maps.clouds, true),
+      transparent: true, opacity: 0.9, depthWrite: false, roughness: 1, metalness: 0,
+      emissive: new THREE.Color(0x2a3440), emissiveIntensity: 1,
+    }),
   );
-  scene.add(clouds);
+  // облака крутятся вокруг оси планеты, поэтому наклон вынесен в пивот
+  const cloudPivot = new THREE.Group();
+  cloudPivot.rotation.x = TILT;
+  cloudPivot.add(clouds);
+  scene.add(cloudPivot);
 
   const atmo = new THREE.Mesh(
     new THREE.SphereGeometry(R_PLANET + ATMO_TOP, 64, 40),
     new THREE.MeshBasicMaterial({ color: 0x4e9ce6, transparent: true, opacity: 0.16, side: THREE.BackSide, depthWrite: false }),
   );
   scene.add(atmo);
-  const halo = new THREE.Mesh(
-    new THREE.SphereGeometry(R_PLANET + ATMO_TOP * 1.9, 64, 40),
-    new THREE.MeshBasicMaterial({ color: 0x2f6fbf, transparent: true, opacity: 0.07, side: THREE.BackSide, depthWrite: false }),
-  );
-  scene.add(halo);
+  const glow = atmosphereGlow(R_PLANET + ATMO_TOP * 1.15);
+  scene.add(glow);
 
   const sun = new THREE.DirectionalLight(0xfff6e6, 3.4);
   sun.position.set(0.38, 0.92, 0.3).normalize().multiplyScalar(6e6);
@@ -235,7 +271,13 @@ export function createWorld(canvas: HTMLCanvasElement, lowPower = false): World 
     renderer.dispose();
   };
 
-  return { scene, camera, renderer, planet, clouds, atmo, pad, sun, trail, trailPositions, trailCount: 0, debris, stars, dispose };
+  // обе шейдерные оболочки светятся относительно направления на солнце
+  const sunDir = sun.position.clone().normalize();
+  (glow.material as THREE.ShaderMaterial).uniforms.sunDir.value.copy(sunDir);
+  (night.material as THREE.ShaderMaterial).uniforms.sunDir.value.copy(sunDir);
+
+  return { scene, camera, renderer, planet, clouds, atmo, glow, night, pad, sun,
+    trail, trailPositions, trailCount: 0, debris, stars, dispose };
 }
 
 export function resetTrail(world: World) {
