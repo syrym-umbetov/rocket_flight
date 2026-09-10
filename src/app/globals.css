@@ -26,7 +26,10 @@ html, body {
 }
 
 .game { position: fixed; inset: 0; }
-.canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.stage { position: absolute; inset: 0; }
+.canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+
+button { touch-action: manipulation; }
 
 /* ---------- панели конструктора ---------- */
 .panel {
@@ -177,13 +180,114 @@ html, body {
   .panel-left, .panel-right { width: 268px; max-height: calc(100vh - 300px); }
   .hud-bc { display: none; }
 }
-@media (max-width: 900px) {
-  .panel-left, .panel-right {
-    position: static; width: auto; max-height: none; margin: 12px;
-  }
-  .panel-bottom { position: static; transform: none; width: auto; margin: 12px; }
-  .game { overflow-y: auto; }
-  .stats { grid-template-columns: repeat(2, 1fr); }
-  .hud-tl, .hud-tr { width: calc(50vw - 24px); }
-  .hud-bl { display: none; }
+
+/* =====================  телефон  ===================== */
+
+.game-mobile { display: flex; flex-direction: column; }
+.game-mobile.game-build .stage { position: relative; flex: 0 0 32vh; min-height: 190px; }
+.game-mobile.game-flight .stage { position: absolute; inset: 0; }
+
+/* --- конструктор --- */
+.sheet {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+  background: rgba(8, 12, 22, 0.96); border-top: 1px solid var(--panel-brd);
+}
+.sheet-head { padding: 10px 12px 0; flex: none; }
+.sheet .brand { font-size: 15px; margin-bottom: 0; }
+.sheet .brand-sub { font-size: 12px; margin: 0 0 14px; }
+
+.tabs { display: flex; gap: 5px; margin: 9px 0 0; }
+.tab {
+  flex: 1; padding: 10px 2px; font-size: 12px; font-family: inherit; cursor: pointer;
+  background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.09);
+  color: var(--muted); border-radius: 9px 9px 0 0; border-bottom: none;
+}
+.tab-on { background: rgba(79, 209, 255, 0.15); color: var(--txt); border-color: var(--accent); }
+
+.sheet-body {
+  flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain; padding: 13px 12px 18px;
+  border-top: 1px solid var(--panel-brd);
+}
+.sheet-body .group { margin-bottom: 18px; }
+.sheet-body .group:last-child { margin-bottom: 0; }
+.sheet-body .opt { padding: 11px 12px; margin-bottom: 7px; }
+.sheet-body .opt-title { font-size: 14px; }
+.sheet-body .opt-sub, .sheet-body .opt-desc { font-size: 12px; }
+.sheet-body .stats { grid-template-columns: repeat(2, 1fr); }
+.sheet-body .check { font-size: 12px; align-items: flex-start; }
+.sheet-body .check-dot { margin-top: 5px; }
+.sheet-body .cbtn { width: 42px; height: 38px; }
+.sheet-body .counter { font-size: 13px; margin-top: 8px; }
+
+.preset-row { display: flex; gap: 8px; }
+.preset-row .ghost { flex: 1; }
+
+.sheet-foot {
+  flex: none; display: flex; gap: 10px; align-items: center;
+  padding: 9px 12px calc(9px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--panel-brd); background: rgba(10, 15, 26, 0.98);
+}
+.mini-stats { display: flex; gap: 12px; flex: 1; min-width: 0; }
+.mini { display: flex; flex-direction: column; }
+.mini-label { font-size: 9.5px; color: var(--muted); letter-spacing: 0.4px; }
+.mini-value { font-size: 14px; font-family: var(--mono); font-weight: 600; }
+.sheet-foot .launch { flex: 0 0 auto; padding: 13px 22px; font-size: 15px; }
+
+/* --- полёт --- */
+.m-top, .m-bottom {
+  position: absolute; left: 0; right: 0; z-index: 5;
+  background: linear-gradient(180deg, rgba(5, 8, 16, 0.92), rgba(5, 8, 16, 0.62));
+  border-bottom: 1px solid var(--panel-brd);
+}
+.m-top { top: 0; padding: calc(8px + env(safe-area-inset-top)) 10px 8px; }
+.m-bottom {
+  bottom: 0; padding: 9px 10px calc(9px + env(safe-area-inset-bottom));
+  background: linear-gradient(0deg, rgba(5, 8, 16, 0.95), rgba(5, 8, 16, 0.6));
+  border-bottom: none; border-top: 1px solid var(--panel-brd);
+}
+
+.m-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; }
+.m-grid-sec { margin-top: 7px; }
+.cell { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.cell-label { font-size: 9.5px; color: var(--muted); white-space: nowrap; }
+.cell-value { font-size: 14px; font-family: var(--mono); font-weight: 600; white-space: nowrap; }
+.cell-sm .cell-value { font-size: 12.5px; }
+
+.m-phase {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-size: 11px; color: var(--muted); margin-top: 7px;
+}
+.m-event { font-size: 12px; margin-top: 5px; line-height: 1.35; }
+
+.m-buttons { display: flex; gap: 6px; margin-top: 8px; }
+.tbtn {
+  flex: 1; min-height: 44px; padding: 4px 6px; font-size: 12px; font-family: inherit;
+  border-radius: 10px; cursor: pointer; color: var(--txt);
+  background: rgba(255, 255, 255, 0.07); border: 1px solid rgba(255, 255, 255, 0.14);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tbtn:active { background: rgba(120, 190, 255, 0.22); }
+.tbtn-on { background: rgba(70, 209, 139, 0.18); border-color: rgba(70, 209, 139, 0.5); color: #9df0c4; }
+.tbtn-warp { flex: 0 0 54px; background: none; border-color: transparent; color: var(--muted); }
+.m-bottom .fuel-label { width: 44px; font-size: 10px; }
+
+.game-mobile .result { padding: 22px 20px; }
+.game-mobile .result-title { font-size: 21px; }
+
+/* телефон в альбомной ориентации: сцена слева, конструктор справа */
+@media (orientation: landscape) and (max-height: 560px) {
+  .game-mobile.game-build { flex-direction: row; }
+  .game-mobile.game-build .stage { flex: 0 0 38%; min-height: 0; }
+  .sheet { border-top: none; border-left: 1px solid var(--panel-brd); }
+  .sheet .brand { font-size: 14px; }
+  .sheet-head { padding: 8px 12px 0; }
+  .sheet-body { padding: 10px 12px 14px; }
+  .m-grid-sec { display: none; }
+  .m-phase { margin-top: 5px; }
+  .m-event { display: none; }
+  .m-bottom .fuel-row { display: none; }
+  .m-bottom { display: flex; align-items: center; gap: 8px; padding: 6px 10px calc(6px + env(safe-area-inset-bottom)); }
+  .m-bottom .m-buttons { margin-top: 0; flex: 1; }
+  .tbtn { min-height: 38px; }
 }

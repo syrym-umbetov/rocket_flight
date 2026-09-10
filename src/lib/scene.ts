@@ -73,8 +73,7 @@ function cloudTexture(): THREE.Texture {
   return tex;
 }
 
-function starField(): THREE.Points {
-  const n = 2600;
+function starField(n: number): THREE.Points {
   const pos = new Float32Array(n * 3);
   const col = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) {
@@ -155,11 +154,11 @@ export interface World {
 
 export const TRAIL_MAX = 4000;
 
-export function createWorld(canvas: HTMLCanvasElement): World {
+export function createWorld(canvas: HTMLCanvasElement, lowPower = false): World {
   const renderer = new THREE.WebGLRenderer({
     canvas, antialias: true, logarithmicDepthBuffer: true, powerPreference: 'high-performance',
   });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, lowPower ? 1.6 : 2));
   renderer.setClearColor(0x03050b, 1);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
@@ -167,18 +166,18 @@ export function createWorld(canvas: HTMLCanvasElement): World {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(52, 1, 0.6, 4e7);
 
-  const stars = starField();
+  const stars = starField(lowPower ? 1200 : 2600);
   (stars.material as THREE.PointsMaterial).transparent = true;
   scene.add(stars);
 
   const planet = new THREE.Mesh(
-    new THREE.SphereGeometry(R_PLANET, 72, 48),
+    new THREE.SphereGeometry(R_PLANET, lowPower ? 48 : 72, lowPower ? 32 : 48),
     new THREE.MeshStandardMaterial({ map: planetTexture(), roughness: 0.95, metalness: 0 }),
   );
   scene.add(planet);
 
   const clouds = new THREE.Mesh(
-    new THREE.SphereGeometry(R_PLANET + 6000, 72, 48),
+    new THREE.SphereGeometry(R_PLANET + 6000, lowPower ? 48 : 72, lowPower ? 32 : 48),
     new THREE.MeshStandardMaterial({ map: cloudTexture(), transparent: true, opacity: 0.42, depthWrite: false }),
   );
   scene.add(clouds);
@@ -197,7 +196,7 @@ export function createWorld(canvas: HTMLCanvasElement): World {
   const sun = new THREE.DirectionalLight(0xfff6e6, 3.4);
   sun.position.set(0.38, 0.92, 0.3).normalize().multiplyScalar(6e6);
   scene.add(sun);
-  scene.add(new THREE.AmbientLight(0x7286a4, 1.0));
+  scene.add(new THREE.AmbientLight(0x7d90ad, 1.25));
   const fill = new THREE.DirectionalLight(0x6c8fbf, 0.45);
   fill.position.set(-1, -0.3, -0.6).normalize().multiplyScalar(6e6);
   scene.add(fill);

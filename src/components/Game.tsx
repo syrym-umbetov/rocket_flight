@@ -10,13 +10,15 @@ import {
   createWorld, makeExplosion, pushTrail, resetTrail, triggerExplosion, updateExplosion,
   type Explosion, type World,
 } from '@/lib/scene';
+import { useMobile } from '@/lib/useMobile';
 import BuilderPanel from './BuilderPanel';
-import HUD from './HUD';
+import HUD, { type HudActions } from './HUD';
 import type { Telemetry } from './types';
 
 type Mode = 'build' | 'flight';
 type CamMode = 'chase' | 'side' | 'orbit';
 const CAM_RU: Record<CamMode, string> = { chase: 'сопровождение', side: 'сбоку', orbit: 'обзор' };
+const CAM_SHORT: Record<CamMode, string> = { chase: 'Хвост', side: 'Сбоку', orbit: 'Обзор' };
 
 const GOOD_PRESET: Design = {
   nose: 'ogive', fins: 'large', payload: 'sat',
@@ -54,6 +56,12 @@ export default function Game() {
   const camOffsetRef = useRef(new THREE.Vector3());
   const buildSpinRef = useRef(0);
 
+  const detected = useMobile();
+  const mobile = detected === true;
+  const layoutReady = detected !== null;
+  const mobileRef = useRef(mobile);
+  mobileRef.current = mobile;
+
   const [design, setDesign] = useState<Design>(DEFAULT_DESIGN);
   const [stats, setStats] = useState<DesignStats>(() => analyze(DEFAULT_DESIGN));
   const [mode, setMode] = useState<Mode>('build');
@@ -85,7 +93,7 @@ export default function Game() {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const world = createWorld(canvas);
+    const world = createWorld(canvas, mobileRef.current);
     worldRef.current = world;
 
     const { state, stats: st } = createFlight(DEFAULT_DESIGN);
@@ -102,6 +110,10 @@ export default function Game() {
     };
     resize();
     window.addEventListener('resize', resize);
+    window.addEventListener('orientationchange', resize);
+    // высота холста меняется при переходе «конструктор ↔ полёт» на телефоне
+    const ro = new ResizeObserver(resize);
+    ro.observe(canvas);
 
     let raf = 0;
     let last = performance.now();
@@ -157,6 +169,8 @@ export default function Game() {
         const ax = new THREE.Vector3(0, 1, 0).applyQuaternion(s.sepQuat);
         jettisonRef.current.quaternion.copy(s.sepQuat);
         jettisonRef.current.position.copy(s.sepPos).addScaledVector(ax, anchor);
+        // далеко улетевший блок только мешает кадру
+        jettisonRef.current.visible = s.sepPos.distanceToSquared(s.pos) < 9e6;
       }
 
       // след
@@ -179,9 +193,16 @@ export default function Game() {
       // --- камера ---
       const alt = Math.max(s.alt, 0);
       const len = stat.layout.totalLength;
+      // Дистанция считается из поля зрения и высоты кадра, свободной от панелей:
+      // на телефоне HUD занимает верх и низ, поэтому камеру нужно отодвинуть.
+      const hpx = world.renderer.domElement.clientHeight || 800;
+      const hudPx = modeRef.current === 'flight' && mobileRef.current ? 170 : 0;
+      const framePart = 0.55 * (Math.max(hpx - hudPx, 120) / hpx);
+      const fitDist = (len / 2) / Math.tan(((world.camera.fov * Math.PI) / 180 / 2) * framePart);
+
       if (modeRef.current === 'build') {
         buildSpinRef.current += real * 0.16;
-        const d = len * 2.1;
+        const d = fitDist * 1.3;
         const a = buildSpinRef.current;
         desired.set(Math.cos(a) * d, R_PLANET + len * 0.75, Math.sin(a) * d);
         target.set(0, R_PLANET + len * 0.5, 0);
@@ -191,12 +212,12 @@ export default function Game() {
         desired.copy(s.pos).addScaledVector(side, d).addScaledVector(up, d * 0.35);
         target.copy(s.pos);
       } else if (camRef.current === 'side') {
-        const d = len * 1.9 + Math.min(alt * 0.02, 220);
+        const d = fitDist * 1.15 + Math.min(alt * 0.02, 220);
         const side = new THREE.Vector3().crossVectors(up, new THREE.Vector3(0, 0, 1)).normalize();
         desired.copy(rocket.root.position).addScaledVector(side, d).addScaledVector(up, len * 0.15);
         target.copy(rocket.root.position).addScaledVector(axis, -len * 0.45);
       } else {
-        const d = len * 1.5 + Math.min(s.speed * 0.05, 260);
+        const d = fitDist + Math.min(s.speed * 0.05, 260);
         const side = new THREE.Vector3().crossVectors(axis, up).normalize();
         if (side.lengthSq() < 0.01) side.set(1, 0, 0);
         desired.copy(rocket.root.position)
@@ -250,36 +271,59 @@ export default function Game() {
 
     return () => {
       cancelAnimationFrame(raf);
+      ro.disconnect();
       window.removeEventListener('resize', resize);
+      window.removeEventListener('orientationchange', resize);
       world.dispose();
       worldRef.current = null;
     };
   }, [rebuildRocket]);
+
+  // --- действия: общие для клавиатуры и экранных кнопок ---
+  const cycleCamera = useCallback(() => {
+    const order: CamMode[] = ['chase', 'side', 'orbit'];
+    const next = order[(order.indexOf(camRef.current) + 1) % order.length];
+    camRef.current = next; setCamMode(next);
+  }, []);
+  const toggleAutopilot = useCallback(() => {
+    const s = simRef.current;
+    if (!s) return;
+    s.autopilot = !s.autopilot;
+    if (!s.autopilot) s.throttle = 1;
+    setTelemetry((t) => (t ? { ...t, autopilot: s.autopilot } : t));
+  }, []);
+  const warpUp = useCallback(() => {
+    const v = warpRef.current >= 20 ? 50 : warpRef.current >= 5 ? 20 : warpRef.current >= 2 ? 5 : 2;
+    warpRef.current = v; setWarp(v);
+  }, []);
+  const warpDown = useCallback(() => {
+    const v = warpRef.current > 20 ? 20 : warpRef.current > 5 ? 5 : warpRef.current > 2 ? 2 : 1;
+    warpRef.current = v; setWarp(v);
+  }, []);
+  const setPitch = useCallback((v: number) => {
+    if (simRef.current) simRef.current.manualPitch = v;
+  }, []);
+  const nudgeThrottle = useCallback((d: number) => {
+    const s = simRef.current;
+    if (s) s.throttle = Math.max(0, Math.min(1, s.throttle + d));
+  }, []);
+
+  const actions: HudActions = { cycleCamera, toggleAutopilot, warpDown, warpUp, pitch: setPitch, throttle: nudgeThrottle };
 
   // --- клавиатура ---
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const s = simRef.current;
       if (!s) return;
-      if (e.code === 'KeyC') {
-        const order: CamMode[] = ['chase', 'side', 'orbit'];
-        const next = order[(order.indexOf(camRef.current) + 1) % order.length];
-        camRef.current = next; setCamMode(next);
-      }
+      if (e.code === 'KeyC') cycleCamera();
       if (modeRef.current !== 'flight') return;
-      if (e.code === 'KeyA') { s.autopilot = !s.autopilot; if (!s.autopilot) s.throttle = 1; }
-      if (e.code === 'Period' || e.code === 'BracketRight') {
-        const v = warpRef.current >= 20 ? 50 : warpRef.current >= 5 ? 20 : warpRef.current >= 2 ? 5 : 2;
-        warpRef.current = v; setWarp(v);
-      }
-      if (e.code === 'Comma' || e.code === 'BracketLeft') {
-        const v = warpRef.current > 20 ? 20 : warpRef.current > 5 ? 5 : warpRef.current > 2 ? 2 : 1;
-        warpRef.current = v; setWarp(v);
-      }
+      if (e.code === 'KeyA') toggleAutopilot();
+      if (e.code === 'Period' || e.code === 'BracketRight') warpUp();
+      if (e.code === 'Comma' || e.code === 'BracketLeft') warpDown();
       if (e.code === 'ArrowUp') { s.manualPitch = -1; e.preventDefault(); }
       if (e.code === 'ArrowDown') { s.manualPitch = 1; e.preventDefault(); }
-      if (e.code === 'ArrowLeft') { s.throttle = Math.max(0, s.throttle - 0.1); }
-      if (e.code === 'ArrowRight') { s.throttle = Math.min(1, s.throttle + 0.1); }
+      if (e.code === 'ArrowLeft') nudgeThrottle(-0.1);
+      if (e.code === 'ArrowRight') nudgeThrottle(0.1);
     };
     const onUp = (e: KeyboardEvent) => {
       const s = simRef.current;
@@ -288,7 +332,7 @@ export default function Game() {
     window.addEventListener('keydown', onKey);
     window.addEventListener('keyup', onUp);
     return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('keyup', onUp); };
-  }, []);
+  }, [cycleCamera, toggleAutopilot, warpUp, warpDown, nudgeThrottle]);
 
   const applyDesign = useCallback((d: Design) => {
     setDesign(d);
@@ -336,17 +380,21 @@ export default function Game() {
   }, [design, applyDesign]);
 
   return (
-    <div className="game">
-      <canvas ref={canvasRef} className="canvas" />
-      {mode === 'build' && (
-        <BuilderPanel design={design} stats={stats} onChange={onChange} onLaunch={startLaunch} onPreset={onPreset} />
+    <div className={`game${mobile ? ' game-mobile' : ''} game-${mode}`}>
+      <div className="stage"><canvas ref={canvasRef} className="canvas" /></div>
+      {layoutReady && mode === 'build' && (
+        <BuilderPanel design={design} stats={stats} mobile={mobile}
+          onChange={onChange} onLaunch={startLaunch} onPreset={onPreset} />
       )}
-      {mode === 'flight' && telemetry && (
+      {layoutReady && mode === 'flight' && telemetry && (
         <>
-          <HUD t={telemetry} warp={warp} camera={CAM_RU[camMode]} />
-          <div className="hints">
-            C — камера · A — автопилот · ←/→ — тяга · ↑/↓ — тангаж (в ручном) · , / . — ускорение времени
-          </div>
+          <HUD t={telemetry} warp={warp} camera={mobile ? CAM_SHORT[camMode] : CAM_RU[camMode]}
+            mobile={mobile} actions={actions} />
+          {!mobile && (
+            <div className="hints">
+              C — камера · A — автопилот · ←/→ — тяга · ↑/↓ — тангаж (в ручном) · , / . — ускорение времени
+            </div>
+          )}
         </>
       )}
       {outcome && (

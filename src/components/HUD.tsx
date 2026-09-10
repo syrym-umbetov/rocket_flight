@@ -7,7 +7,9 @@ const fmt = (v: number, d = 0) =>
 
 function alt(v: number) {
   if (!isFinite(v)) return '∞';
-  return Math.abs(v) >= 1000 ? `${fmt(v / 1000, 1)} км` : `${fmt(v)} м`;
+  // перицентр ниже поверхности означает лишь «упадём» — цифра бесполезна
+  if (v < 0) return '—';
+  return v >= 1000 ? `${fmt(v / 1000, 1)} км` : `${fmt(v)} м`;
 }
 
 const PHASE_RU: Record<string, string> = {
@@ -21,7 +23,93 @@ const PHASE_RU: Record<string, string> = {
   done: 'Полёт завершён',
 };
 
-export default function HUD({ t, warp, camera }: { t: Telemetry; warp: number; camera: string }) {
+export interface HudActions {
+  cycleCamera: () => void;
+  toggleAutopilot: () => void;
+  warpDown: () => void;
+  warpUp: () => void;
+  pitch: (v: number) => void;
+  throttle: (d: number) => void;
+}
+
+interface Props { t: Telemetry; warp: number; camera: string; mobile: boolean; actions: HudActions }
+
+export default function HUD({ t, warp, camera, mobile, actions }: Props) {
+  return mobile ? <MobileHUD t={t} warp={warp} camera={camera} actions={actions} />
+    : <DesktopHUD t={t} warp={warp} camera={camera} />;
+}
+
+/* ---------------- телефон ---------------- */
+
+function MobileHUD({ t, warp, camera, actions }: Omit<Props, 'mobile'>) {
+  const last = t.events[t.events.length - 1];
+  const qPct = Math.min(100, (t.q / 62_000) * 100);
+  return (
+    <>
+      <div className="m-top">
+        <div className="m-grid">
+          <Cell label="Высота" value={alt(t.alt)} />
+          <Cell label="Скорость" value={`${fmt(t.speed)} м/с`} />
+          <Cell label="Апоцентр" value={alt(t.apoapsis)} />
+          <Cell label="Перицентр" value={alt(t.periapsis)} />
+        </div>
+        <div className="m-grid m-grid-sec">
+          <Cell label="Маха" value={fmt(t.mach, 1)} small />
+          <Cell label="Перегр." value={`${fmt(t.gForce, 1)} g`} small />
+          <Cell label="Угол атаки" value={`${fmt((t.aoa * 180) / Math.PI, 0)}°`} small
+            warn={(t.aoa * 180) / Math.PI > 12 && t.q > 8000} />
+          <Cell label="Напор" value={`${fmt(t.q / 1000, 1)} кПа`} small warn={t.q > 45_000} />
+        </div>
+        <div className="bar"><div className="bar-fill bar-q" style={{ width: `${qPct}%` }} /></div>
+        <div className="m-phase">
+          <span>T+{fmt(t.time)} с · {PHASE_RU[t.phase] ?? t.phase}</span>
+          <span>{t.stage === 0 ? '1 ступень' : t.stage === 1 ? '2 ступень' : 'без тяги'}</span>
+        </div>
+        {last && <div className={`m-event log-${last.kind}`}>{last.text}</div>}
+      </div>
+
+      <div className="m-bottom">
+        <div className="fuel-row">
+          <FuelBar label="Ст. 1" v={t.fuel1} />
+          <FuelBar label="Ст. 2" v={t.fuel2} />
+          <FuelBar label="Тяга" v={t.throttle} accent />
+        </div>
+        <div className="m-buttons">
+          <button className="tbtn" onClick={actions.cycleCamera}>{camera}</button>
+          <button className={`tbtn${t.autopilot ? ' tbtn-on' : ''}`} onClick={actions.toggleAutopilot}>
+            {t.autopilot ? 'Авто' : 'Ручное'}
+          </button>
+          <button className="tbtn" onClick={actions.warpDown}>−</button>
+          <button className="tbtn tbtn-warp">×{warp}</button>
+          <button className="tbtn" onClick={actions.warpUp}>+</button>
+        </div>
+        {!t.autopilot && (
+          <div className="m-buttons">
+            <button className="tbtn" onPointerDown={() => actions.pitch(-1)}
+              onPointerUp={() => actions.pitch(0)} onPointerLeave={() => actions.pitch(0)}>▲ нос вверх</button>
+            <button className="tbtn" onPointerDown={() => actions.pitch(1)}
+              onPointerUp={() => actions.pitch(0)} onPointerLeave={() => actions.pitch(0)}>▼ нос вниз</button>
+            <button className="tbtn" onClick={() => actions.throttle(-0.1)}>Тяга −</button>
+            <button className="tbtn" onClick={() => actions.throttle(0.1)}>Тяга +</button>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+function Cell({ label, value, small, warn }: { label: string; value: string; small?: boolean; warn?: boolean }) {
+  return (
+    <div className={`cell${small ? ' cell-sm' : ''}`}>
+      <span className="cell-label">{label}</span>
+      <span className={`cell-value${warn ? ' row-warn' : ''}`}>{value}</span>
+    </div>
+  );
+}
+
+/* ---------------- десктоп ---------------- */
+
+function DesktopHUD({ t, warp, camera }: { t: Telemetry; warp: number; camera: string }) {
   const qPct = Math.min(100, (t.q / 62_000) * 100);
   const aoaDeg = (t.aoa * 180) / Math.PI;
   return (
@@ -95,7 +183,8 @@ function FuelBar({ label, v, accent }: { label: string; v: number; accent?: bool
     <div className="fuel">
       <span className="fuel-label">{label}</span>
       <div className="bar">
-        <div className={`bar-fill ${accent ? 'bar-thr' : 'bar-fuel'}`} style={{ width: `${Math.max(0, Math.min(1, v)) * 100}%` }} />
+        <div className={`bar-fill ${accent ? 'bar-thr' : 'bar-fuel'}`}
+          style={{ width: `${Math.max(0, Math.min(1, v)) * 100}%` }} />
       </div>
     </div>
   );

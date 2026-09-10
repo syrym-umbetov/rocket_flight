@@ -504,7 +504,9 @@ function updatePhase(s: SimState, stats: DesignStats) {
     s.ignitionTimer = 1.6;
     s.separated = true;
     s.sepPos = s.pos.clone();
-    s.sepVel = s.vel.clone();
+    // толкатели разводят ступени: отработавший блок заметно отстаёт
+    const sepAxis = new Vector3(0, 1, 0).applyQuaternion(s.quat).normalize();
+    s.sepVel = s.vel.clone().addScaledVector(sepAxis, -9);
     s.sepQuat = s.quat.clone();
     s.sepAngVel = new Vector3(0.12, 0, 0.35);
     s.phase = s.phase === 'coast' || s.phase === 'circularize' ? s.phase : 'stage2';
