@@ -2,6 +2,7 @@
 
 import * as THREE from 'three';
 import { DIAMETER, type Layout, type Parts } from './design';
+import type { Kit } from './kit';
 
 const WHITE = new THREE.MeshStandardMaterial({ color: 0xf2f4f8, metalness: 0.25, roughness: 0.45 });
 const DARK = new THREE.MeshStandardMaterial({ color: 0x2a2f3a, metalness: 0.6, roughness: 0.4 });
@@ -94,7 +95,106 @@ export interface RocketMeshes {
   plume2: THREE.Group;
 }
 
-export function buildRocket(p: Parts, L: Layout): RocketMeshes {
+/**
+ * Сборка из кита, сделанного в Blender. Детали клонируются: геометрия и
+ * материалы общие, у каждой копии только своя матрица.
+ */
+function fromKit(kit: Kit, p: Parts, L: Layout): RocketMeshes {
+  const root = new THREE.Group();
+  const upper = new THREE.Group();
+  const stage1 = new THREE.Group();
+  root.add(upper, stage1);
+
+  /** Ставит копию детали началом координат на отметку x от носа. */
+  const put = (g: THREE.Group, name: string, x: number, scale?: THREE.Vector3Like) => {
+    const src = kit.get(name);
+    if (!src) return null;
+    const m = src.clone(true);
+    m.position.y = -x;
+    if (scale) m.scale.set(scale.x, scale.y, scale.z);
+    g.add(m);
+    return m;
+  };
+  const sc = (r: number, len: number) => ({ x: r, y: len, z: r });
+
+  // --- верхняя связка ---
+  put(upper, `nose_${p.nose.id}`, L.noseStart);
+  put(upper, 'tube_unit', L.fairingStart, sc(1, L.fairingEnd - L.fairingStart));
+  put(upper, 'band_ring', L.fairingEnd - 0.9, sc(1, 0.75));
+
+  const s2Len = L.s2TankEnd - L.s2TankStart;
+  put(upper, 'tube_unit', L.s2TankStart, sc(0.985, s2Len));
+  const s2Frames = Math.max(2, Math.floor(s2Len / 2.2));
+  for (let i = 0; i < s2Frames; i++) {
+    put(upper, 'frame_ring', L.s2TankStart + (s2Len * (i + 1)) / (s2Frames + 1), sc(0.985, 1));
+  }
+  put(upper, 'skirt_s2', L.s2EngineStart, sc(1, (L.s2EngineEnd - L.s2EngineStart) / 1.8));
+  put(upper, 'nozzle_unit', L.s2EngineEnd - 0.5,
+    sc(p.s2Engine.bell, 2.2));
+
+  // --- первая ступень ---
+  put(stage1, 'interstage', L.interstageStart, sc(1, (L.interstageEnd - L.interstageStart) / 2));
+
+  const s1Len = L.s1TankEnd - L.s1TankStart;
+  put(stage1, 'tube_unit', L.s1TankStart, sc(1, s1Len));
+  const s1Frames = Math.max(3, Math.floor(s1Len / 2.4));
+  for (let i = 0; i < s1Frames; i++) {
+    put(stage1, 'frame_ring', L.s1TankStart + (s1Len * (i + 1)) / (s1Frames + 1), sc(1, 1));
+  }
+  put(stage1, 'band_ring', L.s1TankStart + s1Len * 0.62, sc(1, 1.3));
+  const duct = put(stage1, 'cable_duct', L.s1TankStart + 0.5, sc(1, s1Len - 1));
+  if (duct) duct.position.x = R * 1.02;
+
+  put(stage1, 'skirt_s1', L.s1EngineStart, sc(1, (L.s1EngineEnd - L.s1EngineStart) / 1.85));
+
+  const nozzleTop = L.s1EngineStart + 0.3;
+  const nozzleLen = L.s1EngineEnd - L.s1EngineStart + 0.4;
+  if (p.s1EngineCount === 1) {
+    put(stage1, 'nozzle_unit', nozzleTop, sc(p.s1Engine.bell, nozzleLen));
+  } else {
+    for (let i = 0; i < p.s1EngineCount; i++) {
+      const a = (i / p.s1EngineCount) * Math.PI * 2;
+      const n = put(stage1, 'nozzle_unit', nozzleTop + 0.3,
+        sc(p.s1Engine.bell * 0.78, nozzleLen * 0.85));
+      if (n) {
+        n.position.x = Math.cos(a) * R * 0.45;
+        n.position.z = Math.sin(a) * R * 0.45;
+      }
+    }
+  }
+
+  if (p.fins.cna > 0) {
+    for (let i = 0; i < 4; i++) {
+      const holder = new THREE.Group();
+      holder.position.y = -L.finX;
+      holder.rotation.y = (i / 4) * Math.PI * 2;
+      const blade = kit.get(`fin_${p.fins.id}`)?.clone();
+      if (blade) {
+        blade.position.x = R - 0.06;
+        holder.add(blade);
+      }
+      stage1.add(holder);
+    }
+  }
+
+  const plume1 = makePlume(p.s1Engine.bell * (p.s1EngineCount > 1 ? 1.5 : 1.25));
+  plume1.position.y = -(L.s1EngineEnd + 1.6);
+  stage1.add(plume1);
+
+  const plume2 = makePlume(p.s2Engine.bell * 1.1);
+  plume2.position.y = -(L.s2EngineEnd + 1.2);
+  upper.add(plume2);
+
+  return { root, stage1, upper, plume1, plume2 };
+}
+
+/** Кит используется, когда загрузился; иначе — резервная сборка на примитивах. */
+export function buildRocket(p: Parts, L: Layout, kit?: Kit | null): RocketMeshes {
+  if (kit && kit.size > 0) return fromKit(kit, p, L);
+  return fromPrimitives(p, L);
+}
+
+function fromPrimitives(p: Parts, L: Layout): RocketMeshes {
   const root = new THREE.Group();
   const upper = new THREE.Group();
   const stage1 = new THREE.Group();

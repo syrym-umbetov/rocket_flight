@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { DT, R_PLANET, pressureRatio } from '@/lib/constants';
 import { DEFAULT_DESIGN, analyze, resolveParts, layout, type Design, type DesignStats } from '@/lib/design';
 import { createFlight, launch as igniteRocket, step, type SimState } from '@/lib/physics';
+import { loadKit, type Kit } from '@/lib/kit';
 import { buildRocket, updatePlume, type RocketMeshes } from '@/lib/rocketMesh';
 import {
   createWorld, makeExplosion, pushTrail, resetTrail, triggerExplosion, updateExplosion,
@@ -55,6 +56,8 @@ export default function Game() {
   const camPosRef = useRef(new THREE.Vector3());
   const camOffsetRef = useRef(new THREE.Vector3());
   const buildSpinRef = useRef(0);
+  const kitRef = useRef<Kit | null>(null);
+  const designRef = useRef<Design>(DEFAULT_DESIGN);
 
   const detected = useMobile();
   const mobile = detected === true;
@@ -84,7 +87,7 @@ export default function Game() {
     if (jettisonRef.current) { world.scene.remove(jettisonRef.current); jettisonRef.current = null; }
     const parts = resolveParts(d);
     const L = layout(parts);
-    const meshes = buildRocket(parts, L);
+    const meshes = buildRocket(parts, L, kitRef.current);
     world.scene.add(meshes.root);
     rocketRef.current = meshes;
   }, []);
@@ -100,6 +103,17 @@ export default function Game() {
     simRef.current = state;
     statsRef.current = st;
     rebuildRocket(DEFAULT_DESIGN);
+
+    // Кит из Blender приезжает асинхронно: до него ракета собрана на примитивах,
+    // после загрузки пересобираем её уже из мешей.
+    let alive = true;
+    loadKit().then((k) => {
+      if (!alive) return;
+      kitRef.current = k;
+      rebuildRocket(designRef.current);
+    }).catch((e) => {
+      console.warn('Кит деталей не загрузился, остаёмся на примитивах:', e);
+    });
 
     const resize = () => {
       const w = canvas.clientWidth || window.innerWidth;
@@ -270,6 +284,7 @@ export default function Game() {
     raf = requestAnimationFrame(loop);
 
     return () => {
+      alive = false;
       cancelAnimationFrame(raf);
       ro.disconnect();
       window.removeEventListener('resize', resize);
@@ -335,6 +350,7 @@ export default function Game() {
   }, [cycleCamera, toggleAutopilot, warpUp, warpDown, nudgeThrottle]);
 
   const applyDesign = useCallback((d: Design) => {
+    designRef.current = d;
     setDesign(d);
     setStats(analyze(d));
     const { state, stats: st } = createFlight(d);
