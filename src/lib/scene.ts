@@ -2,6 +2,7 @@
 
 import * as THREE from 'three';
 import { ATMO_TOP, R_PLANET } from './constants';
+import { createLaunchPad, type LaunchPad } from './pad';
 import { generatePlanet } from './planet';
 
 function dataTexture(data: Uint8Array, w: number, h: number, srgb: boolean) {
@@ -103,48 +104,6 @@ function starField(n: number): THREE.Points {
   return new THREE.Points(g, new THREE.PointsMaterial({ size: 22000, vertexColors: true, sizeAttenuation: true }));
 }
 
-function launchPad(): THREE.Group {
-  const g = new THREE.Group();
-  const conc = new THREE.MeshStandardMaterial({ color: 0x9a9a95, roughness: 0.95 });
-  const steel = new THREE.MeshStandardMaterial({ color: 0x5a5f68, metalness: 0.7, roughness: 0.5 });
-
-  const ground = new THREE.Mesh(new THREE.CircleGeometry(9000, 64), new THREE.MeshStandardMaterial({ color: 0x5d6a44, roughness: 1 }));
-  ground.rotation.x = -Math.PI / 2;
-  ground.position.y = -0.6;
-  g.add(ground);
-
-  const apron = new THREE.Mesh(new THREE.CylinderGeometry(70, 74, 1.6, 32), conc);
-  apron.position.y = -0.8;
-  g.add(apron);
-
-  const flame = new THREE.Mesh(new THREE.CylinderGeometry(9, 11, 6, 24, 1, true), steel);
-  flame.position.y = -3;
-  g.add(flame);
-
-  // башня обслуживания
-  const tower = new THREE.Group();
-  for (const [dx, dz] of [[-4, -4], [4, -4], [-4, 4], [4, 4]] as const) {
-    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.7, 48, 0.7), steel);
-    leg.position.set(dx, 24, dz);
-    tower.add(leg);
-  }
-  for (let y = 6; y < 48; y += 7) {
-    const ring = new THREE.Mesh(new THREE.BoxGeometry(9, 0.45, 9), steel);
-    ring.position.y = y;
-    tower.add(ring);
-  }
-  tower.position.set(-14, 0, -13);
-  g.add(tower);
-
-  for (let i = 0; i < 4; i++) {
-    const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
-    const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.7, 30, 10), steel);
-    mast.position.set(Math.cos(a) * 42, 15, Math.sin(a) * 42);
-    g.add(mast);
-  }
-  return g;
-}
-
 export interface World {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
@@ -154,7 +113,7 @@ export interface World {
   atmo: THREE.Mesh;
   glow: THREE.Mesh;
   night: THREE.Mesh;
-  pad: THREE.Group;
+  pad: LaunchPad;
   sun: THREE.DirectionalLight;
   trail: THREE.Line;
   trailPositions: Float32Array;
@@ -237,9 +196,9 @@ export function createWorld(canvas: HTMLCanvasElement, lowPower = false): World 
   fill.position.set(-1, -0.3, -0.6).normalize().multiplyScalar(6e6);
   scene.add(fill);
 
-  const pad = launchPad();
-  pad.position.set(0, R_PLANET, 0);
-  scene.add(pad);
+  const pad = createLaunchPad(lowPower);
+  pad.group.position.set(0, R_PLANET, 0);
+  scene.add(pad.group);
 
   const trailPositions = new Float32Array(TRAIL_MAX * 3);
   const tg = new THREE.BufferGeometry();

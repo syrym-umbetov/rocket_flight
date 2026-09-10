@@ -101,6 +101,8 @@ export default function Game() {
     const meshes = buildRocket(parts, L, kitRef.current);
     world.scene.add(meshes.root);
     rocketRef.current = meshes;
+    // фермы обслуживания встают по высоте именно этой ракеты
+    world.pad.setVehicleLength(L.totalLength);
   }, []);
 
   // --- инициализация сцены ---
@@ -163,6 +165,7 @@ export default function Game() {
     let last = performance.now();
     let acc = 0;
     let hudAcc = 0;
+    let retract = 0;
     const up = new THREE.Vector3();
     const axis = new THREE.Vector3();
     const desired = new THREE.Vector3();
@@ -248,9 +251,12 @@ export default function Game() {
       const fitDist = (len / 2) / Math.tan(((world.camera.fov * Math.PI) / 180 / 2) * framePart);
 
       if (modeRef.current === 'build') {
+        // Облёт качается в секторе, свободном от застройки: полный круг заводил бы
+        // камеру за башню обслуживания, и ракету — то, ради чего эта сцена, —
+        // закрывало бы на треть оборота.
         buildSpinRef.current += real * 0.16;
-        const d = fitDist * 1.3;
-        const a = buildSpinRef.current;
+        const d = fitDist * 1.32;
+        const a = world.pad.viewAzimuth + Math.sin(buildSpinRef.current * 0.42) * 1.0;
         desired.set(Math.cos(a) * d, R_PLANET + len * 0.75, Math.sin(a) * d);
         target.set(0, R_PLANET + len * 0.5, 0);
       } else if (camRef.current === 'orbit') {
@@ -282,6 +288,11 @@ export default function Game() {
       world.camera.position.copy(anchorPos).add(camPosRef.current);
       world.camera.up.copy(up);
       world.camera.lookAt(target);
+
+      // фермы обслуживания отходят от ракеты по зажиганию и возвращаются в конструкторе
+      const wantRetract = modeRef.current === 'flight' && s.phase !== 'prelaunch' ? 1 : 0;
+      retract += (wantRetract - retract) * (1 - Math.pow(0.08, real));
+      world.pad.setRetract(Math.abs(retract - wantRetract) < 0.002 ? wantRetract : retract);
 
       world.clouds.rotation.y += real * 0.00004;
       world.stars.position.copy(world.camera.position);
